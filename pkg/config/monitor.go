@@ -31,9 +31,63 @@ func (ms MonitorSettings) IsEnabled() bool {
 	return *ms.Enabled
 }
 
+// MetricsSettings holds configuration for the node_exporter compatible metrics
+// endpoint.
+//
+// Unlike the health monitors, this endpoint is opt-in: it defaults to disabled.
+// Serving host metrics exposes an additional network listener from a privileged,
+// host-networked process, so enabling it must be an explicit customer decision
+// rather than something that appears on upgrade.
+type MetricsSettings struct {
+	// Enabled turns the metrics endpoint on. Defaults to false when unset.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Address is the listen address, defaulting to ":9100".
+	Address string `yaml:"address,omitempty" json:"address,omitempty"`
+	// Collectors optionally restricts which upstream collectors run. Empty means
+	// the upstream default set, which is what gives node_exporter parity.
+	Collectors []string `yaml:"collectors,omitempty" json:"collectors,omitempty"`
+	// ExtraArgs are upstream node_exporter flags such as "--no-collector.zfs" or
+	// "--collector.textfile.directory=/var/lib/node_exporter".
+	ExtraArgs []string `yaml:"extraArgs,omitempty" json:"extraArgs,omitempty"`
+	// IncludeExporterMetrics adds go_* and process_* metrics for the agent.
+	IncludeExporterMetrics *bool `yaml:"includeExporterMetrics,omitempty" json:"includeExporterMetrics,omitempty"`
+}
+
+// IsEnabled reports whether the metrics endpoint is enabled.
+//
+// NOTE: this intentionally differs from MonitorSettings.IsEnabled, which
+// defaults to true. A nil or absent metrics configuration means disabled so that
+// upgrading the agent never starts a new listener implicitly.
+func (ms *MetricsSettings) IsEnabled() bool {
+	if ms == nil || ms.Enabled == nil {
+		return false
+	}
+	return *ms.Enabled
+}
+
 // MonitorConfig is the top-level configuration structure.
 type MonitorConfig struct {
 	Monitors map[string]MonitorSettings `yaml:"monitors,omitempty" json:"monitors,omitempty"`
+	// Metrics configures the node_exporter compatible metrics endpoint.
+	Metrics *MetricsSettings `yaml:"metrics,omitempty" json:"metrics,omitempty"`
+}
+
+// IsMetricsEnabled reports whether the node_exporter compatible metrics endpoint
+// is enabled. It defaults to false, including when the config is absent.
+func (mc *MonitorConfig) IsMetricsEnabled() bool {
+	if mc == nil {
+		return false
+	}
+	return mc.Metrics.IsEnabled()
+}
+
+// GetMetricsSettings returns the metrics settings, or the zero value when unset
+// so callers can read defaults without nil checks.
+func (mc *MonitorConfig) GetMetricsSettings() MetricsSettings {
+	if mc == nil || mc.Metrics == nil {
+		return MetricsSettings{}
+	}
+	return *mc.Metrics
 }
 
 // IsMonitorEnabled checks if a given plugin is enabled.
