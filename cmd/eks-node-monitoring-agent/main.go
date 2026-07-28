@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"slices"
@@ -34,6 +35,7 @@ import (
 	"github.com/aws/eks-node-monitoring-agent/pkg/controllers"
 	"github.com/aws/eks-node-monitoring-agent/pkg/diagnostic"
 	"github.com/aws/eks-node-monitoring-agent/pkg/manager"
+	"github.com/aws/eks-node-monitoring-agent/pkg/metrics"
 	"github.com/aws/eks-node-monitoring-agent/pkg/monitor/registry"
 
 	// Import monitor packages to trigger auto-registration via init()
@@ -56,6 +58,8 @@ var (
 	controllerPprofAddress       string
 	hostname                     string
 	verbosity                    int
+	metricsOnly                  bool
+	metricsEndpointAddress       string
 
 	legacyNodeRBAC bool
 )
@@ -110,6 +114,14 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+
+	// Metrics-only mode serves the node_exporter compatible endpoint without
+	// joining a cluster. It exists so hack/parity-test.sh can diff this endpoint
+	// against upstream node_exporter on a plain host, with no Kubernetes API
+	// server available.
+	if metricsOnly {
+		return runMetricsOnly(ctx, logger)
+	}
 
 	if enableConsoleDiagnostics {
 		startConsoleDiagnostics(ctx)
@@ -359,6 +371,33 @@ func run() error {
 		return err
 	}
 
+	// Initialize the node_exporter compatible metrics endpoint. This is opt-in
+	// and disabled by default: when it is off no listener is created at all.
+	if monitorConfig.IsMetricsEnabled() {
+		metricsSettings := monitorConfig.GetMetricsSettings()
+		logger.Info("initializing node_exporter compatible metrics endpoint",
+			"address", metricsSettings.Address,
+			"collectors", metricsSettings.Collectors,
+		)
+		metricsServer, err := metrics.NewServer(newSlogLogger(verbosity), metrics.Options{
+			Address:                metricsSettings.Address,
+			Collectors:             metricsSettings.Collectors,
+			UpstreamArgs:           metricsSettings.ExtraArgs,
+			IncludeExporterMetrics: metricsSettings.IncludeExporterMetrics != nil && *metricsSettings.IncludeExporterMetrics,
+			HostRoot:               config.HostRoot(),
+		})
+		if err != nil {
+			logger.Error(err, "failed to create metrics server")
+			return err
+		}
+		if err := mgr.Add(metricsServer); err != nil {
+			logger.Error(err, "failed to add metrics server to controller")
+			return err
+		}
+	} else {
+		logger.Info("node_exporter compatible metrics endpoint is disabled")
+	}
+
 	// Initialize and register NodeDiagnostic controller for log collection
 	logger.Info("initializing node diagnostic controller")
 	diagnosticController := controllers.NewNodeDiagnosticController(mgr.GetClient(), hostname, runtimeContext)
@@ -397,6 +436,36 @@ func newLogger(verbosity int) logr.Logger {
 	)
 }
 
+// runMetricsOnly serves just the node_exporter compatible metrics endpoint.
+//
+// It deliberately skips the controller manager, monitors and Kubernetes clients
+// so parity against upstream node_exporter can be verified on any host.
+func runMetricsOnly(ctx context.Context, logger logr.Logger) error {
+	logger.Info("running in metrics-only mode", "address", metricsEndpointAddress)
+
+	metricsServer, err := metrics.NewServer(newSlogLogger(verbosity), metrics.Options{
+		Address:  metricsEndpointAddress,
+		HostRoot: config.HostRoot(),
+	})
+	if err != nil {
+		logger.Error(err, "failed to create metrics server")
+		return err
+	}
+	return metricsServer.Start(log.IntoContext(ctx, logger))
+}
+
+// newSlogLogger builds the *slog.Logger required by the upstream node_exporter
+// collectors. The agent logs through logr/zap, but the vendored collector code
+// takes slog, so this bridges the two while keeping the JSON output shape and
+// honouring the same verbosity flag.
+func newSlogLogger(verbosity int) *slog.Logger {
+	level := slog.LevelInfo
+	if verbosity >= 2 {
+		level = slog.LevelDebug
+	}
+	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+}
+
 func parseFlags() error {
 	flagSet := pflag.NewFlagSet(os.Args[0], pflag.ExitOnError)
 	flagSet.AddGoFlagSet(flag.CommandLine)
@@ -405,6 +474,8 @@ func parseFlags() error {
 	flagSet.BoolVar(&legacyNodeRBAC, "legacy-node-rbac", false, "Enable the legacy rbac permissions for accessing node resources")
 	flagSet.StringVar(&controllerHealthProbeAddress, "probe-address", ":8081", "Address for the controller runtime health probe endpoints")
 	flagSet.StringVar(&controllerMetricsAddress, "metrics-address", ":8080", "Address for the controller runtime metrics endpoint")
+	flagSet.BoolVar(&metricsOnly, "metrics-only", false, "Serve only the node_exporter compatible metrics endpoint, without joining a cluster (used by hack/parity-test.sh)")
+	flagSet.StringVar(&metricsEndpointAddress, "metrics-endpoint-address", metrics.DefaultAddress, "Address for the node_exporter compatible metrics endpoint in metrics-only mode")
 	flagSet.StringVar(&controllerPprofAddress, "pprof-address", "", "Address for the controller runtime pprof endpoint (default disabled)")
 	flagSet.IntVarP(&verbosity, "verbosity", "v", 2, "Logging verbosity level")
 	return flagSet.Parse(os.Args[1:])
