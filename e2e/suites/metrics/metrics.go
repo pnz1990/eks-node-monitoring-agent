@@ -1,0 +1,214 @@
+// Package metrics contains end-to-end tests for the node_exporter compatible
+// metrics endpoint served by the agent.
+//
+// The tests scrape the endpoint from inside the cluster and assert on the metric
+// contract that Prometheus dashboards and alerting rules depend on. Metric names
+// are asserted against a live scrape rather than a static list because several
+// upstream names are generated at runtime from host state.
+package metrics
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/e2e-framework/klient/k8s/resources"
+	"sigs.k8s.io/e2e-framework/pkg/envconf"
+	"sigs.k8s.io/e2e-framework/pkg/features"
+)
+
+const (
+	daemonSetName      = "eks-node-monitoring-agent"
+	daemonSetNamespace = "kube-system"
+	// metricsPort is the node_exporter convention the agent reuses so existing
+	// scrape configuration keeps working.
+	metricsPort = 9100
+)
+
+// coreMetrics are the metric families that essentially every node dashboard and
+// alerting rule depends on. They are asserted individually so a failure names the
+// specific missing family rather than reporting a generic mismatch.
+var coreMetrics = []string{
+	"node_cpu_seconds_total",
+	"node_memory_MemTotal_bytes",
+	"node_memory_MemAvailable_bytes",
+	"node_filesystem_avail_bytes",
+	"node_filesystem_size_bytes",
+	"node_disk_read_bytes_total",
+	"node_disk_written_bytes_total",
+	"node_network_receive_bytes_total",
+	"node_network_transmit_bytes_total",
+	"node_load1",
+	"node_load5",
+	"node_load15",
+	"node_boot_time_seconds",
+	"node_uname_info",
+	"node_vmstat_pgfault",
+	"node_pressure_cpu_waiting_seconds_total",
+}
+
+// contractMetrics are the exporter self-metrics that form part of the endpoint
+// contract. node_scrape_collector_success in particular is commonly alerted on.
+var contractMetrics = []string{
+	"node_exporter_build_info",
+	"node_scrape_collector_success",
+	"node_scrape_collector_duration_seconds",
+}
+
+// agentPod returns one running agent pod to scrape.
+func agentPod(ctx context.Context, t *testing.T, cfg *envconf.Config) *corev1.Pod {
+	t.Helper()
+	var pods corev1.PodList
+	err := cfg.Client().Resources(daemonSetNamespace).List(ctx, &pods,
+		resources.WithLabelSelector("app.kubernetes.io/name="+daemonSetName),
+	)
+	if err != nil {
+		t.Fatalf("failed to list agent pods: %v", err)
+	}
+	for i := range pods.Items {
+		if pods.Items[i].Status.Phase == corev1.PodRunning {
+			return &pods.Items[i]
+		}
+	}
+	t.Fatalf("no running agent pod found in %s", daemonSetNamespace)
+	return nil
+}
+
+// scrapeMetrics fetches the metrics endpoint from inside the cluster by running a
+// curl pod on the agent pod's node, reaching it over the host network.
+func scrapeMetrics(ctx context.Context, t *testing.T, cfg *envconf.Config, nodeName string) string {
+	t.Helper()
+
+	podName := fmt.Sprintf("metrics-scraper-%d", time.Now().UnixNano())
+	scraper := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Namespace: daemonSetNamespace,
+		},
+		Spec: corev1.PodSpec{
+			// hostNetwork lets the scraper reach the agent's host-network
+			// listener on localhost, matching how a node-local Prometheus would.
+			HostNetwork:   true,
+			NodeName:      nodeName,
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers: []corev1.Container{{
+				Name:  "scraper",
+				Image: "public.ecr.aws/docker/library/curlimages/curl:latest",
+				Command: []string{
+					"curl", "-sS", "--max-time", "30", "--retry", "10", "--retry-delay", "3",
+					"--retry-connrefused",
+					fmt.Sprintf("http://127.0.0.1:%d/metrics", metricsPort),
+				},
+			}},
+		},
+	}
+
+	if err := cfg.Client().Resources().Create(ctx, scraper); err != nil {
+		t.Fatalf("failed to create scraper pod: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cfg.Client().Resources().Delete(context.Background(), scraper)
+	})
+
+	// Wait for the scrape to finish.
+	deadline := time.Now().Add(3 * time.Minute)
+	for time.Now().Before(deadline) {
+		var p corev1.Pod
+		if err := cfg.Client().Resources(daemonSetNamespace).Get(ctx, podName, daemonSetNamespace, &p); err == nil {
+			if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+				break
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+
+	logs, err := podLogs(ctx, cfg, daemonSetNamespace, podName)
+	if err != nil {
+		t.Fatalf("failed to read scraper logs: %v", err)
+	}
+	if strings.TrimSpace(logs) == "" {
+		t.Fatal("scraper returned no output; the metrics endpoint may not be listening")
+	}
+	return logs
+}
+
+// EndpointServesCoreMetrics asserts the endpoint serves the metric families that
+// dashboards and alerts depend on.
+func EndpointServesCoreMetrics() features.Feature {
+	return features.New("EndpointServesCoreMetrics").
+		WithLabel("suite", "metrics").
+		Assess("core node metrics are present", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			pod := agentPod(ctx, t, cfg)
+			body := scrapeMetrics(ctx, t, cfg, pod.Spec.NodeName)
+
+			for _, name := range coreMetrics {
+				if !strings.Contains(body, "\n"+name) && !strings.HasPrefix(body, name) {
+					t.Errorf("metric %q missing from the endpoint", name)
+				}
+			}
+			t.Logf("verified %d core metric families on node %s", len(coreMetrics), pod.Spec.NodeName)
+			return ctx
+		}).
+		Feature()
+}
+
+// EndpointServesContractMetrics asserts the exporter self-metrics are present.
+func EndpointServesContractMetrics() features.Feature {
+	return features.New("EndpointServesContractMetrics").
+		WithLabel("suite", "metrics").
+		Assess("exporter contract metrics are present", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			pod := agentPod(ctx, t, cfg)
+			body := scrapeMetrics(ctx, t, cfg, pod.Spec.NodeName)
+
+			for _, name := range contractMetrics {
+				if !strings.Contains(body, name) {
+					t.Errorf("contract metric %q missing from the endpoint", name)
+				}
+			}
+
+			// Every collector that ran must report success; a zero here means a
+			// collector is failing on this node and would silently lose metrics.
+			for _, line := range strings.Split(body, "\n") {
+				if strings.HasPrefix(line, "node_scrape_collector_success{") && strings.HasSuffix(line, " 0") {
+					t.Errorf("collector reported failure: %s", line)
+				}
+			}
+			return ctx
+		}).
+		Feature()
+}
+
+// MetricsDoNotDisturbNodeConditions asserts the agent still reports its health
+// conditions while serving metrics, guarding the shared-fate risk of running a
+// scrape-driven workload inside the event-driven agent.
+func MetricsDoNotDisturbNodeConditions() features.Feature {
+	return features.New("MetricsDoNotDisturbNodeConditions").
+		WithLabel("suite", "metrics").
+		Assess("node conditions are still reported", func(ctx context.Context, t *testing.T, cfg *envconf.Config) context.Context {
+			pod := agentPod(ctx, t, cfg)
+
+			var node corev1.Node
+			if err := cfg.Client().Resources().Get(ctx, pod.Spec.NodeName, "", &node); err != nil {
+				t.Fatalf("failed to get node %s: %v", pod.Spec.NodeName, err)
+			}
+
+			// The agent owns these conditions; if serving metrics broke the
+			// monitor loop they would be missing or stale.
+			want := []string{"KernelReady", "StorageReady", "NetworkingReady", "ContainerRuntimeReady"}
+			found := map[string]bool{}
+			for _, c := range node.Status.Conditions {
+				found[string(c.Type)] = true
+			}
+			for _, w := range want {
+				if !found[w] {
+					t.Errorf("node condition %q missing while metrics endpoint is enabled", w)
+				}
+			}
+			return ctx
+		}).
+		Feature()
+}
