@@ -20,6 +20,7 @@ import (
 	"github.com/aws/eks-node-monitoring-agent/e2e/suites/addon"
 	"github.com/aws/eks-node-monitoring-agent/e2e/suites/basic"
 	"github.com/aws/eks-node-monitoring-agent/e2e/suites/monitors"
+	metricssuite "github.com/aws/eks-node-monitoring-agent/e2e/suites/metrics"
 	"github.com/aws/eks-node-monitoring-agent/e2e/suites/nodediagnostic"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -152,6 +153,16 @@ func TestWrapper(t *testing.T, Testenv env.Environment) {
 		monitors.Soak(checkDaemonSet),
 		monitors.Generic(),
 	)
+
+	// node_exporter compatible metrics endpoint. Runs before the disruptive
+	// suites so it observes a steady-state agent.
+	t.Run("Metrics", func(t *testing.T) {
+		Testenv.TestInParallel(t,
+			metricssuite.EndpointServesCoreMetrics(),
+			metricssuite.EndpointServesContractMetrics(),
+			metricssuite.MetricsDoNotDisturbNodeConditions(),
+		)
+	})
 
 	t.Run("ParallelMonitors", func(t *testing.T) {
 		// detection cases are run in parallel to speed up testing.
