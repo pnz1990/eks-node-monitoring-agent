@@ -65,6 +65,12 @@ The following table lists the configurable parameters for this chart and their d
 | nodeAgent.image.pullPolicy | string | `"IfNotPresent"` | Container pull policyfor the eks-node-monitoring-agent |
 | nodeAgent.image.region | string | `"us-west-2"` | ECR repository region for the eks-node-monitoring-agent |
 | nodeAgent.image.tag | string | `"v1.6.7-eksbuild.1"` | Image tag for the eks-node-monitoring-agent |
+| nodeAgent.metrics | object | see [`values.yaml`](./values.yaml) | Prometheus node_exporter compatible metrics endpoint. Disabled by default: enabling it exposes an additional listener from the privileged, host-networked agent, so it must be an explicit opt-in. When enabled the agent serves node_exporter compatible metrics and can replace a separate prometheus-node-exporter deployment. |
+| nodeAgent.metrics.collectors | list | `[]` | Restrict which upstream collectors run. Empty uses the upstream default set, which is what gives node_exporter parity. |
+| nodeAgent.metrics.enabled | bool | `false` | Enable the node_exporter compatible metrics endpoint. |
+| nodeAgent.metrics.extraArgs | list | `[]` | Additional upstream node_exporter flags, for example "--no-collector.zfs" or "--collector.textfile.directory=/var/lib/node_exporter". |
+| nodeAgent.metrics.includeExporterMetrics | bool | `false` | Include go_* and process_* metrics describing the agent itself. |
+| nodeAgent.metrics.port | int | `9100` | Port for the metrics endpoint. 9100 is the node_exporter convention, so existing scrape configuration keeps working. |
 | nodeAgent.monitors | object | `{}` | Per-monitor configuration keyed by plugin name. See the main README for details. |
 | nodeAgent.podAnnotations | object | `{}` | Pod annotations applied to the eks-node-monitoring-agent |
 | nodeAgent.podLabels | object | `{}` | Pod labels applied to the eks-node-monitoring-agent |

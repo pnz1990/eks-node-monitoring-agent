@@ -97,6 +97,26 @@ nodeAgent:
   podLabels: {}
   # -- Per-monitor configuration keyed by plugin name. See the main README for details.
   monitors: {}
+  # -- Prometheus node_exporter compatible metrics endpoint. Disabled by default:
+  # enabling it exposes an additional listener from the privileged, host-networked
+  # agent, so it must be an explicit opt-in. When enabled the agent serves
+  # node_exporter compatible metrics and can replace a separate
+  # prometheus-node-exporter deployment.
+  # @default -- see [`values.yaml`](./values.yaml)
+  metrics:
+    # -- Enable the node_exporter compatible metrics endpoint.
+    enabled: false
+    # -- Port for the metrics endpoint. 9100 is the node_exporter convention, so
+    # existing scrape configuration keeps working.
+    port: 9100
+    # -- Restrict which upstream collectors run. Empty uses the upstream default
+    # set, which is what gives node_exporter parity.
+    collectors: []
+    # -- Additional upstream node_exporter flags, for example
+    # "--no-collector.zfs" or "--collector.textfile.directory=/var/lib/node_exporter".
+    extraArgs: []
+    # -- Include go_* and process_* metrics describing the agent itself.
+    includeExporterMetrics: false
   # -- Pod annotations applied to the eks-node-monitoring-agent
   podAnnotations: {}
 

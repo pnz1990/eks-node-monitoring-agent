@@ -1,4 +1,4 @@
-{{- if .Values.nodeAgent.monitors }}
+{{- if or .Values.nodeAgent.monitors .Values.nodeAgent.metrics.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,6 +8,22 @@ metadata:
     {{- include "eks-node-monitoring-agent.labels" . | nindent 4 }}
 data:
   config.yaml: |
+    {{- with .Values.nodeAgent.monitors }}
     monitors:
-      {{- toYaml .Values.nodeAgent.monitors | nindent 6 }}
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- if .Values.nodeAgent.metrics.enabled }}
+    metrics:
+      enabled: true
+      address: ":{{ .Values.nodeAgent.metrics.port }}"
+      {{- with .Values.nodeAgent.metrics.collectors }}
+      collectors:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeAgent.metrics.extraArgs }}
+      extraArgs:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      includeExporterMetrics: {{ .Values.nodeAgent.metrics.includeExporterMetrics }}
+    {{- end }}
 {{- end }}

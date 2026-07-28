@@ -60,6 +60,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+          {{- if .Values.nodeAgent.metrics.enabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.nodeAgent.metrics.port | default 9100 }}
+              hostPort: {{ .Values.nodeAgent.metrics.port | default 9100 }}
+              protocol: TCP
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -77,7 +84,7 @@ spec:
           volumeMounts:
             - name: host-root
               mountPath: /host
-            {{- if .Values.nodeAgent.monitors }}
+            {{- if or .Values.nodeAgent.monitors .Values.nodeAgent.metrics.enabled }}
             - name: monitor-config
               mountPath: /etc/nma
               readOnly: true
@@ -86,7 +93,7 @@ spec:
         - name: host-root
           hostPath:
             path: /
-        {{- if .Values.nodeAgent.monitors }}
+        {{- if or .Values.nodeAgent.monitors .Values.nodeAgent.metrics.enabled }}
         - name: monitor-config
           configMap:
             name: {{ include "eks-node-monitoring-agent.fullname" . }}-monitor-config

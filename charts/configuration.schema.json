@@ -63,6 +63,9 @@
                 "tolerations": {
                     "$ref": "#/definitions/Tolerations"
                 },
+                "metrics": {
+                    "$ref": "#/definitions/MetricsSettings"
+                },
                 "monitors": {
                     "type": "object",
                     "description": "Per-monitor configuration keyed by plugin name",
@@ -240,6 +243,47 @@
                     "type": "boolean",
                     "description": "Whether this monitor is enabled",
                     "default": true
+                }
+            }
+        },
+        "MetricsSettings": {
+            "title": "MetricsSettings",
+            "type": "object",
+            "description": "Prometheus node_exporter compatible metrics endpoint. Disabled by default; enabling exposes an additional listener from the privileged agent.",
+            "additionalProperties": false,
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Whether the node_exporter compatible metrics endpoint is enabled",
+                    "default": false
+                },
+                "port": {
+                    "type": "integer",
+                    "description": "Port for the metrics endpoint (9100 is the node_exporter convention)",
+                    "default": 9100,
+                    "minimum": 1,
+                    "maximum": 65535
+                },
+                "collectors": {
+                    "type": "array",
+                    "description": "Restrict which upstream collectors run. Empty uses the upstream default set.",
+                    "default": [],
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "extraArgs": {
+                    "type": "array",
+                    "description": "Additional upstream node_exporter flags, e.g. --no-collector.zfs",
+                    "default": [],
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "includeExporterMetrics": {
+                    "type": "boolean",
+                    "description": "Include go_* and process_* metrics describing the agent itself",
+                    "default": false
                 }
             }
         },
