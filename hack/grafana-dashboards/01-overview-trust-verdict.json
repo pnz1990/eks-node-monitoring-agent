@@ -1,0 +1,822 @@
+{
+  "title": "NMA vs PNE \u2014 Overview & Trust Verdict",
+  "uid": "nma-pne-overview",
+  "tags": [
+    "parity"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "TRUST VERDICT \u2014 can NMA metrics be relied on?",
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "((count(count by(__name__)(last_over_time({job=\"pne\",__name__!~\"go_.*|process_.*|promhttp_.*|node_scrape_.*|node_exporter_build_info|node_textfile_.*\"}[2m])) unless on(__name__) count by(__name__)(last_over_time({job=\"nma\",__name__!~\"go_.*|process_.*|promhttp_.*|node_scrape_.*|node_exporter_build_info|node_textfile_.*\"}[2m]))) or vector(0)) == bool 0) * ((count(count by(__name__)(last_over_time({job=\"nma\",__name__!~\"go_.*|process_.*|promhttp_.*|node_scrape_.*|node_exporter_build_info|node_textfile_.*\"}[2m])) unless on(__name__) count by(__name__)(last_over_time({job=\"pne\",__name__!~\"go_.*|process_.*|promhttp_.*|node_scrape_.*|node_exporter_build_info|node_textfile_.*\"}[2m]))) or vector(0)) == bool 0) * ((count(node_memory_MemTotal_bytes{job=\"pne\"} != on(instance) node_memory_MemTotal_bytes{job=\"nma\"}) or vector(0)) == bool 0) * clamp_max((100 * count((abs(rate(node_cpu_seconds_total{job=\"pne\"}[15m]) - on(instance,cpu,mode) rate(node_cpu_seconds_total{job=\"nma\"}[15m])) / on(instance,cpu,mode) clamp_min(rate(node_cpu_seconds_total{job=\"pne\"}[15m]), 0.001)) <= 0.05) / count(abs(rate(node_cpu_seconds_total{job=\"pne\"}[15m]) - on(instance,cpu,mode) rate(node_cpu_seconds_total{job=\"nma\"}[15m])) / on(instance,cpu,mode) clamp_min(rate(node_cpu_seconds_total{job=\"pne\"}[15m]), 0.001))) >= bool 99, 1) * 2",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "NOT TRUSTWORTHY \u2014 DISCREPANCIES DETECTED",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "TRUSTWORTHY WITH DOCUMENTED EXCEPTIONS",
+                  "color": "orange",
+                  "index": 1
+                },
+                "2": {
+                  "text": "METRICS TRUSTWORTHY",
+                  "color": "green",
+                  "index": 2
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "V1 structural \u2014 metric names missing from NMA",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "count(count by(__name__)(last_over_time({job=\"pne\",__name__!~\"go_.*|process_.*|promhttp_.*|node_scrape_.*|node_exporter_build_info|node_textfile_.*\"}[2m])) unless on(__name__) count by(__name__)(last_over_time({job=\"nma\",__name__!~\"go_.*|process_.*|promhttp_.*|node_scrape_.*|node_exporter_build_info|node_textfile_.*\"}[2m]))) or vector(0)",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "PASS",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "FAIL",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "V1 structural \u2014 extra names only in NMA",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "count(count by(__name__)(last_over_time({job=\"nma\",__name__!~\"go_.*|process_.*|promhttp_.*|node_scrape_.*|node_exporter_build_info|node_textfile_.*\"}[2m])) unless on(__name__) count by(__name__)(last_over_time({job=\"pne\",__name__!~\"go_.*|process_.*|promhttp_.*|node_scrape_.*|node_exporter_build_info|node_textfile_.*\"}[2m]))) or vector(0)",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "PASS",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "FAIL",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "V2 invariants \u2014 value mismatches (must be 0)",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "count(node_memory_MemTotal_bytes{job=\"pne\"} != on(instance) node_memory_MemTotal_bytes{job=\"nma\"}) or vector(0)",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "PASS",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "FAIL",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "V3 counter rates \u2014 % within 5% tolerance",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "100 * count((abs(rate(node_cpu_seconds_total{job=\"pne\"}[15m]) - on(instance,cpu,mode) rate(node_cpu_seconds_total{job=\"nma\"}[15m])) / on(instance,cpu,mode) clamp_min(rate(node_cpu_seconds_total{job=\"pne\"}[15m]), 0.001)) <= 0.05) / count(abs(rate(node_cpu_seconds_total{job=\"pne\"}[15m]) - on(instance,cpu,mode) rate(node_cpu_seconds_total{job=\"nma\"}[15m])) / on(instance,cpu,mode) clamp_min(rate(node_cpu_seconds_total{job=\"pne\"}[15m]), 0.001))",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 95
+              },
+              {
+                "color": "green",
+                "value": 99
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "PNE targets up",
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 0,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "count(up{job=\"pne\"} == 1) or vector(0)",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "NMA targets up",
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 4,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "count(up{job=\"nma\"} == 1) or vector(0)",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "PNE node metric names",
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 8,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "count(count by(__name__)(last_over_time({job=\"pne\",__name__!~\"go_.*|process_.*|promhttp_.*|node_scrape_.*|node_exporter_build_info|node_textfile_.*\"}[2m])))",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "NMA node metric names",
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 12,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "count(count by(__name__)(last_over_time({job=\"nma\",__name__!~\"go_.*|process_.*|promhttp_.*|node_scrape_.*|node_exporter_build_info|node_textfile_.*\"}[2m])))",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "PNE series",
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 16,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "count({job=\"pne\"})",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "NMA series",
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 20,
+        "y": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "count({job=\"nma\"})",
+          "legendFormat": "",
+          "range": true,
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "V3 counter-rate agreement over time \u2014 tolerance 5% (line)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "(100 * count((abs(rate(node_cpu_seconds_total{job=\"pne\"}[15m]) - on(instance,cpu,mode) rate(node_cpu_seconds_total{job=\"nma\"}[15m])) / on(instance,cpu,mode) clamp_min(rate(node_cpu_seconds_total{job=\"pne\"}[15m]), 0.001)) <= 0.05) / count(abs(rate(node_cpu_seconds_total{job=\"pne\"}[15m]) - on(instance,cpu,mode) rate(node_cpu_seconds_total{job=\"nma\"}[15m])) / on(instance,cpu,mode) clamp_min(rate(node_cpu_seconds_total{job=\"pne\"}[15m]), 0.001)))",
+          "legendFormat": "% of CPU counter series within 5%",
+          "range": true,
+          "refId": "A",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 99
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "If this drops below 99% the agent's counter rates have diverged from upstream."
+    }
+  ],
+  "description": "Top panel is the computed trust verdict. GREEN requires V1 asymmetry=0, V2 mismatches=0, and V3>=99% within 5%."
+}

@@ -1,0 +1,607 @@
+{
+  "title": "NMA vs PNE \u2014 Delta & Trust Detail",
+  "uid": "nma-pne-delta",
+  "tags": [
+    "parity"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "V2 invariants \u2014 absolute delta (MUST be flat zero)",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "abs(node_memory_MemTotal_bytes{job=\"pne\"} - on(instance) node_memory_MemTotal_bytes{job=\"nma\"})",
+          "legendFormat": "MemTotal {{instance}}",
+          "range": true,
+          "refId": "A",
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "abs(node_boot_time_seconds{job=\"pne\"} - on(instance) node_boot_time_seconds{job=\"nma\"})",
+          "legendFormat": "boot_time {{instance}}",
+          "range": true,
+          "refId": "B",
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "abs(node_filesystem_size_bytes{job=\"pne\"} - on(instance,device,fstype,mountpoint) node_filesystem_size_bytes{job=\"nma\"})",
+          "legendFormat": "fs_size {{mountpoint}}",
+          "range": true,
+          "refId": "C",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Any non-zero value here is a genuine defect, not sampling noise."
+    },
+    {
+      "type": "timeseries",
+      "title": "V3 CPU counter rate error \u2014 tolerance 5%",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "abs(rate(node_cpu_seconds_total{job=\"pne\"}[15m]) - on(instance,cpu,mode) rate(node_cpu_seconds_total{job=\"nma\"}[15m])) / on(instance,cpu,mode) clamp_min(abs(rate(node_cpu_seconds_total{job=\"pne\"}[15m])), 0.001)",
+          "legendFormat": "{{instance}} cpu{{cpu}} {{mode}}",
+          "range": true,
+          "refId": "A",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "V3 network counter rate error \u2014 tolerance 5%",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "abs(rate(node_network_receive_bytes_total{job=\"pne\"}[15m]) - on(instance,device) rate(node_network_receive_bytes_total{job=\"nma\"}[15m])) / on(instance,device) clamp_min(abs(rate(node_network_receive_bytes_total{job=\"pne\"}[15m])), 0.001)",
+          "legendFormat": "rx {{device}}",
+          "range": true,
+          "refId": "A",
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "abs(rate(node_network_transmit_bytes_total{job=\"pne\"}[15m]) - on(instance,device) rate(node_network_transmit_bytes_total{job=\"nma\"}[15m])) / on(instance,device) clamp_min(abs(rate(node_network_transmit_bytes_total{job=\"pne\"}[15m])), 0.001)",
+          "legendFormat": "tx {{device}}",
+          "range": true,
+          "refId": "B",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "lo (loopback) is expected to differ: each scrape adds loopback traffic, so whichever exporter is scraped second observes more."
+    },
+    {
+      "type": "timeseries",
+      "title": "V3 disk counter rate error \u2014 tolerance 5%",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "abs(rate(node_disk_read_bytes_total{job=\"pne\"}[15m]) - on(instance,device) rate(node_disk_read_bytes_total{job=\"nma\"}[15m])) / on(instance,device) clamp_min(abs(rate(node_disk_read_bytes_total{job=\"pne\"}[15m])), 0.001)",
+          "legendFormat": "read {{device}}",
+          "range": true,
+          "refId": "A",
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "abs(rate(node_disk_written_bytes_total{job=\"pne\"}[15m]) - on(instance,device) rate(node_disk_written_bytes_total{job=\"nma\"}[15m])) / on(instance,device) clamp_min(abs(rate(node_disk_written_bytes_total{job=\"pne\"}[15m])), 0.001)",
+          "legendFormat": "written {{device}}",
+          "range": true,
+          "refId": "B",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "V4 stable gauge error \u2014 tolerance 10%",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "abs(node_memory_MemAvailable_bytes{job=\"pne\"} - on(instance) node_memory_MemAvailable_bytes{job=\"nma\"}) / on(instance) clamp_min(abs(node_memory_MemAvailable_bytes{job=\"pne\"}), 0.001)",
+          "legendFormat": "MemAvailable",
+          "range": true,
+          "refId": "A",
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "abs(node_memory_Cached_bytes{job=\"pne\"} - on(instance) node_memory_Cached_bytes{job=\"nma\"}) / on(instance) clamp_min(abs(node_memory_Cached_bytes{job=\"pne\"}), 0.001)",
+          "legendFormat": "Cached",
+          "range": true,
+          "refId": "B",
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "abs(node_filesystem_avail_bytes{job=\"pne\"} - on(instance,device,fstype,mountpoint) node_filesystem_avail_bytes{job=\"nma\"}) / on(instance,device,fstype,mountpoint) clamp_min(abs(node_filesystem_avail_bytes{job=\"pne\"}), 0.001)",
+          "legendFormat": "fs_avail {{mountpoint}}",
+          "range": true,
+          "refId": "C",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "KNOWN DIVERGENCE \u2014 node_procs_running (observer effect, NOT a defect)",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "node_procs_running{job=\"pne\"}",
+          "legendFormat": "pne",
+          "range": true,
+          "refId": "A",
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "node_procs_running{job=\"nma\"}",
+          "legendFormat": "nma",
+          "range": true,
+          "refId": "B",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "procs_running counts runnable threads, and the counting process is itself runnable. The agent is a larger process than a standalone exporter, so it perturbs this metric more. node_load1 agrees over the same window, confirming system load is identical. Alerts on absolute node_procs_running need retuning after migration."
+    },
+    {
+      "type": "timeseries",
+      "title": "Load average \u2014 confirms the procs_running divergence is observation, not load",
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "node_load1{job=\"pne\"}",
+          "legendFormat": "pne load1",
+          "range": true,
+          "refId": "A",
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "node_load1{job=\"nma\"}",
+          "legendFormat": "nma load1",
+          "range": true,
+          "refId": "B",
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time(node_load1{job=\"pne\"}[30m])",
+          "legendFormat": "pne load1 avg30m",
+          "range": true,
+          "refId": "C",
+          "instant": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "avg_over_time(node_load1{job=\"nma\"}[30m])",
+          "legendFormat": "nma load1 avg30m",
+          "range": true,
+          "refId": "D",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "If the smoothed load averages agree, the two exporters see the same machine."
+    }
+  ],
+  "description": "Per-tier relative error with tolerance thresholds drawn. Red crossings indicate discrepancy."
+}
