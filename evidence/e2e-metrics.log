@@ -1,0 +1,21 @@
+=== RUN   Test
+=== RUN   Test/Metrics
+=== RUN   Test/Metrics/MetricsDoNotDisturbNodeConditions
+=== RUN   Test/Metrics/EndpointServesContractMetrics
+=== RUN   Test/Metrics/EndpointServesContractMetrics/exporter_contract_metrics_are_present
+=== RUN   Test/Metrics/EndpointServesCoreMetrics
+=== RUN   Test/Metrics/MetricsDoNotDisturbNodeConditions/node_conditions_are_still_reported
+=== RUN   Test/Metrics/EndpointServesCoreMetrics/core_node_metrics_are_present
+=== NAME  Test/Metrics/EndpointServesContractMetrics/exporter_contract_metrics_are_present
+    metrics.go:238: collectors reporting failure (absent hardware/filesystem, matches upstream): [bcachefs bonding fibrechannel hwmon ipvs nfs nfsd rapl tapestats zfs]
+=== NAME  Test/Metrics/EndpointServesCoreMetrics/core_node_metrics_are_present
+    metrics.go:198: verified 16 core metric families on node ip-192-168-45-100.us-west-2.compute.internal
+--- PASS: Test (23.18s)
+    --- PASS: Test/Metrics (3.18s)
+        --- PASS: Test/Metrics/MetricsDoNotDisturbNodeConditions (0.05s)
+            --- PASS: Test/Metrics/MetricsDoNotDisturbNodeConditions/node_conditions_are_still_reported (0.05s)
+        --- PASS: Test/Metrics/EndpointServesContractMetrics (3.17s)
+            --- PASS: Test/Metrics/EndpointServesContractMetrics/exporter_contract_metrics_are_present (3.17s)
+        --- PASS: Test/Metrics/EndpointServesCoreMetrics (3.18s)
+            --- PASS: Test/Metrics/EndpointServesCoreMetrics/core_node_metrics_are_present (3.18s)
+PASS
