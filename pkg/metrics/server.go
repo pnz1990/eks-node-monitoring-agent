@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -55,6 +56,34 @@ type Options struct {
 	// default; negative disables the bound and restores upstream's unbounded
 	// behaviour.
 	CollectorTimeout time.Duration
+}
+
+// validateAddress rejects an address that can never be bound, so an operator
+// config error fails at construction rather than silently disabling the endpoint.
+//
+// See the note on Start: a MALFORMED address is a config bug (fail loudly), while
+// a port already IN USE is an environmental condition (degrade). Splitting them by
+// when they are detected avoids matching on error strings at runtime, which would
+// be brittle across Go versions and platforms.
+//
+// net.SplitHostPort catches missing/extra colons; the port must then be a decimal
+// in 0-65535. Port 0 is allowed and means "any free port", which tests rely on.
+// The HOST is deliberately NOT resolved -- that would make construction depend on
+// DNS, and an unresolvable host is exactly the runtime condition Start handles.
+func validateAddress(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid metrics address %q: %w", addr, err)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("invalid metrics address %q: port %q is not a number", addr, port)
+	}
+	if n < 0 || n > 65535 {
+		return fmt.Errorf("invalid metrics address %q: port %d is out of range 0-65535", addr, n)
+	}
+	_ = host
+	return nil
 }
 
 // withDefaults returns a copy of o with unset fields populated.
@@ -119,6 +148,10 @@ type registerFunc func(prometheus.Registerer, *collector.NodeCollector, time.Dur
 
 func newServer(logger *slog.Logger, opts Options, resolve resolveFunc, newCollector collectorFunc, register registerFunc) (*Server, error) {
 	opts = opts.withDefaults()
+
+	if err := validateAddress(opts.Address); err != nil {
+		return nil, err
+	}
 
 	// Order matters: EKS defaults first, then host paths, then the operator's own
 	// flags last so they take precedence (kingpin is last-wins).
@@ -363,12 +396,55 @@ func (s *Server) Address() string {
 //
 // It satisfies controller-runtime's Runnable interface so the agent's manager
 // owns its lifecycle alongside the monitors.
+//
+// A BIND FAILURE MUST NOT KILL THE AGENT. See FINDING F-K4-1 in
+// JOURNAL-KARPENTER.md: a port conflict here used to propagate out of Start, and
+// because controller-runtime treats a Runnable error as fatal — and
+// `utilruntime.Must(run())` in main.go turns it into a panic — the WHOLE PROCESS
+// died. That process also publishes the NodeConditions that EKS node auto repair
+// and Karpenter act on, so a metrics-port conflict took down node health
+// reporting. Measured on a Karpenter node: 5/5 pods in CrashLoopBackOff with
+// `panic: failed to listen on :9102: bind: address already in use`.
+//
+// That is the exact inverse of what the resilience boundary exists for. That
+// boundary stops a *collector* defect from killing condition reporting, and it
+// works — but a *startup* bind failure bypassed it entirely.
+//
+// So the endpoint now degrades instead: the failure is logged at ERROR, the
+// listener is not retried, and Start returns nil so the manager keeps the
+// monitors running. Losing node metrics is bad; losing NodeConditions is worse,
+// because it makes a node invisible to repair.
+//
+// TWO KINDS OF FAILURE, DELIBERATELY HANDLED DIFFERENTLY — this distinction is the
+// reason validateAddress exists in NewServer/NewNativeServer:
+//
+//	MALFORMED ADDRESS ("not-an-address", port 99999) is an OPERATOR CONFIG ERROR.
+//	It can never succeed, no environment will fix it, and silently disabling the
+//	endpoint would mean a typo in values.yaml produces an agent that looks healthy
+//	and serves nothing. That still fails loudly, at CONSTRUCTION.
+//
+//	PORT ALREADY IN USE is an ENVIRONMENTAL CONDITION. The config is valid, another
+//	process got there first, and the right response is to keep reporting node
+//	health. That degrades, here.
+//
+// Collapsing the two would trade one bad outcome for another, so they are split by
+// *when* they are detected rather than by inspecting error strings at runtime.
 func (s *Server) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx)
 
 	listener, err := s.listen("tcp", s.opts.Address)
 	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %w", s.opts.Address, err)
+		// Deliberately nil, not an error. The agent's primary job is node health
+		// reporting, and it must survive an unusable metrics port.
+		logger.Error(err, "failed to listen for node_exporter compatible metrics; "+
+			"the metrics endpoint is DISABLED for the lifetime of this process, but node "+
+			"condition reporting continues",
+			"address", s.opts.Address,
+			"hint", "another process already holds this port -- a node_exporter DaemonSet is "+
+				"the usual cause; set nodeAgent.metrics.port to a free port or remove the "+
+				"conflicting deployment",
+		)
+		return nil
 	}
 	srv := &http.Server{
 		Handler: s.handler,

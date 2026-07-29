@@ -102,17 +102,35 @@ func TestStartServeClosedIsNotAnError(t *testing.T) {
 	assert.NoError(t, srv.Start(context.Background()))
 }
 
-func TestStartListenInjectedError(t *testing.T) {
+func TestStartListenInjectedErrorDoesNotKillTheAgent(t *testing.T) {
+	// CONTRACT CHANGED BY FINDING F-K4-1, and this test changed with it.
+	//
+	// Start used to RETURN the bind error. controller-runtime treats a Runnable
+	// error as fatal and main.go wraps run() in utilruntime.Must, so that error
+	// became a panic and killed the process -- the same process that publishes the
+	// NodeConditions EKS node auto repair and Karpenter act on. Measured on a
+	// Karpenter node: 5/5 CrashLoopBackOff with
+	// "panic: failed to listen on :9102: bind: address already in use".
+	//
+	// So a bind failure must now DEGRADE the endpoint, not end the agent. Asserting
+	// nil here is asserting that node health reporting survives an unusable metrics
+	// port.
 	srv, err := NewServer(quietLogger(), Options{Address: "127.0.0.1:0", Collectors: []string{"loadavg"}})
 	require.NoError(t, err)
 
 	sentinel := errors.New("cannot bind")
 	srv.listen = func(string, string) (net.Listener, error) { return nil, sentinel }
 
-	err = srv.Start(context.Background())
-	require.Error(t, err)
-	assert.ErrorIs(t, err, sentinel)
-	assert.Contains(t, err.Error(), "failed to listen")
+	require.NoError(t, srv.Start(context.Background()),
+		"a bind failure must not propagate: it would panic the agent and take node "+
+			"condition reporting down with it")
+
+	// And the endpoint must genuinely be absent rather than half-initialised, so a
+	// caller cannot mistake a failed bind for a working listener.
+	srv.mu.RLock()
+	ln := srv.listener
+	srv.mu.RUnlock()
+	assert.Nil(t, ln, "no listener should be published when the bind failed")
 }
 
 func TestStartShutdownError(t *testing.T) {
