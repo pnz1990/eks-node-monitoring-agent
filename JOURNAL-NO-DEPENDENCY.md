@@ -586,3 +586,94 @@ cause on this one: the filesystem data race, the vmstat malformed-line panic, an
 `conntrack`).
 
 ---
+## N3 — `diskstats` + shared `deviceFilter`
+
+The largest single collector so far (546 upstream lines across two files), and the first where **every**
+failure mode is a wrong *value* rather than a wrong *shape*. The names come out right no matter what you
+do; the numbers do not. Three traps, all invisible to the three-way harness because it compares the
+contract:
+
+**1. The discard-sectors asymmetry.** `ReadSectors` and `WriteSectors` are multiplied by 512 to become
+`*_bytes_total`. `DiscardSectors` is **not** — it is emitted raw, because the metric is named
+`discarded_sectors_total` and is denominated in sectors. All three are "sectors" in `/proc/diskstats`
+and only two are converted. This is the single easiest field in the file to "fix" into a 512x bug, and
+the resulting metric has the right name, type and labels.
+
+**2. `statCount` truncation.** `/proc/diskstats` has 14 fields pre-4.18, 18 on 4.18+, 20 on 5.5+.
+Upstream emits only as many metrics as the kernel actually reported. Zero-filling instead would assert
+"this disk has never discarded" when the truth is "this kernel does not say" — and `rate()` graphs that
+lie as a confident flat line. `IoStatsCount` includes major, minor and the device name, hence the `- 3`;
+an off-by-one there shifts the boundary by a whole metric.
+
+**3. Unit conversions.** Sectors are always UNIX 512-byte sectors *regardless of the device's real block
+size*. An NVMe device with 4096-byte blocks still reports 512-byte sectors, so reading the actual block
+size from sysfs and using it — which looks more correct — makes every byte counter 8x too large.
+
+**Four negative controls, each mutating the source and confirming the specific test fails:**
+
+```
+mutation                                          → failing tests
+DiscardSectors * unixSectorSize ("consistency")   → 1  (TestDiskstatsDiscardSectorsAreNotConverted...)
+remove the truncation guard (zero-fill)           → 2  (ShortLinesTruncate..., TruncationBoundaryIsExact)
+statCount - 2 instead of - 3 (off-by-one)         → 2
+io_now typed as a counter                         → 1
+swap two positional descs                         → 2  (DescOrderMatchesUpstream, SectorsConverted)
+```
+
+The zero-fill control is worth recording because its output shows exactly the fabricated data the guard
+prevents — `map[...]{"dm-0":0, "nvme1n1":1600, "sdz":0}` for `flush_requests_total`, i.e. two devices
+confidently reporting zero flushes on kernels that never mentioned flushes.
+
+**A measurement error of my own, caught before it misled me.** My first pass at the zero-fill and
+io_now controls reported **0 failing tests**, which reads as "the test doesn't bite". Both mutations had
+actually failed to *compile* (`declared and not used: statCount` / `gauge`), so no test ran at all — and
+my `grep -c '^--- FAIL'` counted zero. **A negative control that does not build is not a passing
+control, it is no control**, and counting failures rather than reading output hid the difference. Redone
+with the mutations kept compiling (`&& false`, `_ = gauge`) and both fail as intended. Same root cause
+as the earlier SIGPIPE harness bug: a check that reports success when it did not actually run.
+
+**Positional pairing is load-bearing twice over.** `descs` and `values` pair *by index*, and truncation
+drops from the *end*. So a reordering both mislabels values and truncates the wrong fields.
+`TestDiskstatsDescOrderMatchesUpstream` extracts upstream's `descs` slice in order — resolving the
+inline `NewDesc` calls *and* the shared `*Desc` vars from `diskstats_common.go` — and compares the
+sequence, not the set. `io_now` is the only gauge among the 17 (it is a queue depth that goes up and
+down; typed as a counter, `rate()` treats every decrease as a reset), asserted individually.
+
+**Live validation against the cluster golden corpus — exact match:**
+```
+ours (live host):  18 node_disk_* families, 1 series each
+PNE (node45):      18 node_disk_* families, 1 series each     IDENTICAL
+```
+Also confirms udev **is** populated on EKS — the golden `node_disk_info` carries real `path`, `model`,
+`serial` (`vol023eb1d2f25982ce5`) and `wwn` values — so the udev path is load-bearing, not dead code.
+
+**`deviceFilter` extracted to its own file**, as upstream has it: shared by ten upstream collectors,
+three of which (`diskstats`, `arp`, `infiniband`) are in the 39. **One deliberate divergence:** upstream
+uses `regexp.MustCompile` and *panics* on an invalid pattern. That is tolerable upstream because kingpin
+parses before any collector is built, so a bad pattern panics at startup with a stack trace. Here the
+patterns can come from a Helm value, and a panic on first scrape inside a DaemonSet is a crash loop with
+no useful message. Returns an error instead; behaviour is identical for every valid pattern.
+
+**Two other small divergences, both recorded rather than silent:**
+- exclude+include supplied together is a *construction error*, not a silent precedence rule. Upstream
+  enforces mutual exclusion at the flag layer, which this package does not have. "Include wins" and
+  "exclude wins" yield different metric sets and an operator cannot tell which they got.
+- `readUdevProperties` returns `scanner.Err()`; upstream ignores it and returns the partial map. A
+  truncated read yields partial labels, and a disk silently missing its serial is worse than a reported
+  read failure. The caller logs at debug and keeps the counters either way, so it cannot fail the
+  collector.
+
+**No EKS-specific exclusion added here**, unlike filesystem — and that is a measured decision, not an
+omission. A node reports exactly **one** block device (`nvme0n1`): EBS volumes are whole devices and
+containers do not create block devices, so there is no churn cardinality to solve. Upstream's default
+already excludes the loop/ram/partition devices that would cause one.
+
+**Gates:** coverage 100.0% on first run (including `devicefilter.go`) · race clean · vet clean ·
+staticcheck clean · 147 tests in the package (was 113) · `.covignore` untouched.
+
+**Progress: 9 of 39** — `loadavg`, `meminfo`, `cpu`, `vmstat`, `stat`, `filesystem`, `netdev`,
+`netclass`, `diskstats`.
+
+**Next:** the `/proc/net` group — `netstat`, `sockstat`, `softnet`, `udp_queues`, `arp`, `conntrack`.
+
+---
