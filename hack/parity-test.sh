@@ -47,6 +47,18 @@ done
 
 mkdir -p "${OUT_DIR}"
 
+# Refuse to run if either port is already bound. A stale exporter left over from a
+# previous run silently produces a nonsense diff: the "upstream" contract fills
+# with whatever that process serves, and the harness reports a parity violation
+# that has nothing to do with the agent. Observed in practice, so it is checked.
+for port in "${UPSTREAM_PORT}" "${AGENT_PORT}"; do
+  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ":${port} "; then
+    echo "ERROR: port ${port} is already in use; a stale exporter would corrupt the comparison." >&2
+    echo "       Free it, or set UPSTREAM_PORT/AGENT_PORT to unused ports." >&2
+    exit 2
+  fi
+done
+
 cleanup() {
   [[ -n "${UPSTREAM_PID:-}" ]] && kill "${UPSTREAM_PID}" 2>/dev/null || true
   [[ -n "${AGENT_PID:-}" ]] && kill "${AGENT_PID}" 2>/dev/null || true
@@ -70,6 +82,14 @@ echo ">> starting upstream node_exporter on :${UPSTREAM_PORT}"
   > "${OUT_DIR}/upstream.log" 2>&1 &
 UPSTREAM_PID=$!
 wait_for_endpoint "http://127.0.0.1:${UPSTREAM_PORT}/metrics" "upstream node_exporter"
+
+# Sanity-check that the thing answering really is node_exporter. Without this a
+# stale unrelated process on the port produces a meaningless diff.
+if ! curl -s "http://127.0.0.1:${UPSTREAM_PORT}/metrics" | grep -q "^node_exporter_build_info"; then
+  echo "ERROR: the endpoint on ${UPSTREAM_PORT} does not look like node_exporter" >&2
+  echo "       (node_exporter_build_info absent). Refusing to compare against it." >&2
+  exit 2
+fi
 
 echo ">> starting agent metrics endpoint on :${AGENT_PORT}"
 # --metrics-only makes the agent serve just the metrics endpoint, without

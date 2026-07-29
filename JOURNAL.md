@@ -681,3 +681,65 @@ GPU/Neuron nodes, Bottlerocket, multi-hour soak, scrape-storm (manifest written 
 cases and linters. Scale back to 2 nodes to cut cost.
 
 ---
+## [2026-07-29T01:35Z] P5 complete — edge cases found two more real bugs
+
+**Phase:** P5 edge cases + quality
+**Status:** fixed
+
+**What I did:** Added `pkg/metrics/edgecases_test.go` — adversarial inputs drawn from real upstream bug
+shapes (malformed procfs, absent paths, invalid config, lifecycle races, resource exhaustion). Ran
+`staticcheck`, `gofmt`, `go vet`, and the race detector.
+
+**Two real bugs found, neither reachable by the existing tests:**
+
+1. **Crash on `MetricsPath: "/"`.** `newHandler` registered both the metrics path and the landing page,
+   and `http.ServeMux` **panics** on a duplicate pattern. Setting the metrics path to `/` — a plausible
+   operator choice — killed the agent at startup.
+   ```
+   panic: ... net/http.(*ServeMux).register ... server.go:2882
+     newHandler  pkg/metrics/server.go:210
+   ```
+   Fixed: register the landing page only when the metrics path is not `/`; serving metrics wins, since
+   that is what the operator explicitly asked for.
+
+2. **A second data race**, on `s.server`. `Start` wrote the field while its own serve goroutine read it,
+   so calling `Start` twice raced. Found by `TestRepeatedStartAfterShutdown`. Fixed by building the
+   `http.Server` into a local, publishing it under the existing mutex, and having the goroutine and the
+   shutdown path use the local rather than the field.
+
+**Linter findings fixed:** three files unformatted (`gofmt -w`), and `staticcheck` flagged
+`eksIgnoredNetDevices` as unused (U1000) — dead code left behind when the netclass default was rejected.
+Moved it into a doc comment rather than keeping an unused constant.
+
+**A harness weakness worth recording.** Mid-run the parity harness reported a violation whose diff was
+full of `addon_controller_*` and `controller_runtime_*` series. Those cannot come from node_exporter: a
+stale process from an earlier run still held port 19101, so the harness compared the agent against
+*that*. It reported PARITY VIOLATED for a reason unrelated to the agent.
+
+I nearly chased this as a code regression. Hardened the harness with two guards:
+- refuse to start if either port is already bound
+- verify the "upstream" endpoint actually serves `node_exporter_build_info` before trusting it
+
+**Negative control on the guard** (a harness guard that cannot fire is worthless): stood up a fake HTTP
+server serving `controller_runtime_reconcile_total` on the upstream port. The harness exits **2** with
+`the endpoint on 19601 does not look like node_exporter ... Refusing to compare against it`. Confirmed
+working.
+
+**Final state of the quality gates:**
+| Gate | Result |
+|---|---|
+| `pkg/metrics` coverage | **100.0%** of statements |
+| `go test -race` | **clean** |
+| `staticcheck` | **clean** |
+| `gofmt` / `go vet` | **clean** |
+| Parity vs upstream | **298 / 298, empty diff, exit 0** |
+
+**Running tally of bugs found by this work: 8.** Four during the original parity work, one novel
+cardinality defect, three in P1/P5 (the guard's own channel-lifetime bugs counted as one group), plus
+two races and the ServeMux panic. Every one was found by *running* something — a live cluster, the race
+detector, a linter, or an adversarial input — not by reading code.
+
+**Next:** P6 — refresh the evidence bundle and the CONTRIBUTING compliance audit, and write the
+"better than PNE" summary grounded in what P1–P5 actually measured.
+
+---

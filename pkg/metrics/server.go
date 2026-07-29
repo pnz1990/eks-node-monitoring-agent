@@ -205,16 +205,24 @@ func newHandler(registry *prometheus.Registry, nc *collector.NodeCollector, opts
 
 	mux := http.NewServeMux()
 	mux.Handle(opts.MetricsPath, promHandler)
-	// Upstream serves an HTML landing page on any unmatched path rather than a
-	// bare 404, and integration tests in the wild assert on it.
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, landingPage, opts.MetricsPath, version.Version)
-	})
+
+	// Upstream serves an HTML landing page on "/" rather than a bare 404, and
+	// integration tests in the wild assert on it.
+	//
+	// Registering it is conditional because http.ServeMux panics on a duplicate
+	// pattern: if the operator sets the metrics path to "/" the two registrations
+	// collide and the agent dies at startup. Serving metrics takes precedence,
+	// since that is what the operator explicitly asked for.
+	if opts.MetricsPath != "/" {
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			fmt.Fprintf(w, landingPage, opts.MetricsPath, version.Version)
+		})
+	}
 	return mux
 }
 
@@ -256,16 +264,20 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", s.opts.Address, err)
 	}
-	s.mu.Lock()
-	s.listener = listener
-	s.mu.Unlock()
-
-	s.server = &http.Server{
+	srv := &http.Server{
 		Handler: s.handler,
 		// ReadHeaderTimeout bounds slow-header clients; the metrics endpoint is
 		// reachable on the host network so it must not be trivially tied up.
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+
+	// listener and server are read by the serve goroutine and by Address, so both
+	// are published under the lock. srv is also kept in a local so this function
+	// and its goroutine never read the field concurrently with a second Start.
+	s.mu.Lock()
+	s.listener = listener
+	s.server = srv
+	s.mu.Unlock()
 
 	logger.Info("serving node_exporter compatible metrics",
 		"address", listener.Addr().String(),
@@ -274,7 +286,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := s.serve(s.server, listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := s.serve(srv, listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("metrics server failed: %w", err)
 			return
 		}
@@ -287,7 +299,7 @@ func (s *Server) Start(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := s.shutdown(s.server, shutdownCtx); err != nil {
+		if err := s.shutdown(srv, shutdownCtx); err != nil {
 			return fmt.Errorf("failed to shut down metrics server: %w", err)
 		}
 		return nil

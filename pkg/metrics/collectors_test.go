@@ -2,9 +2,9 @@ package metrics_test
 
 import (
 	"io"
+	"log/slog"
 	"regexp"
 	"strings"
-	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"

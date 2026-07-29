@@ -219,7 +219,9 @@ func TestNewServerRegisterError(t *testing.T) {
 		func(*slog.Logger, ...string) (*collector.NodeCollector, error) {
 			return &collector.NodeCollector{Collectors: nil}, nil
 		},
-		func(prometheus.Registerer, *collector.NodeCollector, time.Duration, *slog.Logger) error { return sentinel },
+		func(prometheus.Registerer, *collector.NodeCollector, time.Duration, *slog.Logger) error {
+			return sentinel
+		},
 	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, sentinel)
