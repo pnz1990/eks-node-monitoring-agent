@@ -82,3 +82,22 @@ credentials), dashboards hardcoded to our job labels, `JOURNAL.md`, pressure man
 nodegroup selectors, design doc referencing internal systems.
 
 Needs a clean upstream branch by cherry-picking the product commits. Ready to execute on request.
+
+## Q7 — Upstream bugs found while porting: file them?
+**Status:** OPEN, accumulating
+
+Porting reads upstream's implementation line by line, which surfaces defects that using it as a
+dependency never would. Found so far:
+
+1. **`vmstat` panics on a malformed line.** `collector/vmstat_linux.go` does
+   `parts := strings.Fields(line); strconv.ParseFloat(parts[1], 64)` with no length check, so a
+   single-token or empty line in `/proc/vmstat` indexes out of range and panics. Verified by reading
+   the source. Our port skips the line instead.
+
+Each of these is a candidate upstream issue or PR. They are *more* valuable to upstream than our
+endpoint work, and cheap to contribute individually. But filing is a public post to
+`prometheus/node_exporter`, so it needs the same go-ahead as Q4.
+
+**Recommendation:** batch them and file after the port is further along, so the list is complete rather
+than trickled. Confirming ND4 (the prediction that porting reveals ≥1 upstream bug) — already true at
+5 of 39 collectors.
