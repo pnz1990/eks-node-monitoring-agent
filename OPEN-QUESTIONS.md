@@ -94,6 +94,21 @@ dependency never would. Found so far:
    single-token or empty line in `/proc/vmstat` indexes out of range and panics. Verified by reading
    the source. Our port skips the line instead.
 
+2. **`filesystem` has an unsynchronized data race on its result slice.**
+   `collector/filesystem_linux.go` `GetStats()` declares `stats := []filesystemStats{}` on the calling
+   goroutine, then appends to it from **two** goroutines with no mutex:
+   - the spawned goroutine appends a `deviceError` entry for each mount already known to be stuck
+   - the caller appends every entry drained from `statChan`
+
+   These overlap: the spawned goroutine is still iterating mount points while the caller drains the
+   channel. A racing `append` can lose entries or tear the slice header.
+
+   Only triggers when a stuck mount is already recorded, which is why it has survived — the path is
+   dormant on a healthy host. Found by reading the code, not by running it; `go test -race` would not
+   catch it without a hung mount.
+
+   Our port must fix this. Filing upstream is more valuable than the fix itself.
+
 Each of these is a candidate upstream issue or PR. They are *more* valuable to upstream than our
 endpoint work, and cheap to contribute individually. But filing is a public post to
 `prometheus/node_exporter`, so it needs the same go-ahead as Q4.
