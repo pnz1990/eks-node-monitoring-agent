@@ -677,3 +677,121 @@ staticcheck clean · 147 tests in the package (was 113) · `.covignore` untouche
 **Next:** the `/proc/net` group — `netstat`, `sockstat`, `softnet`, `udp_queues`, `arp`, `conntrack`.
 
 ---
+## N3 — the `/proc/net` group: `netstat`, `softnet`, `udp_queues`
+
+### A FOURTH upstream crash, and an honest severity assessment
+
+Upstream's `parseNetStats` computes the protocol name by stripping the trailing colon:
+
+```go
+nameParts := strings.Split(scanner.Text(), " ")
+scanner.Scan()
+valueParts := strings.Split(scanner.Text(), " ")
+protocol := nameParts[0][:len(nameParts[0])-1]   // <-- [:-1] on an empty line
+```
+
+On an **empty line** `nameParts[0]` is `""` and this becomes `[:-1]`, which panics. Verified against a
+verbatim copy of upstream's function in isolation:
+
+```
+well-formed            ok
+trailing empty line    PANIC: slice bounds out of range [:-1]
+leading empty line     PANIC
+empty line in middle   PANIC
+blank-only file        PANIC
+odd number of lines    ok, err=field count mismatch
+```
+
+**Severity, stated honestly: this is NOT reachable on a healthy kernel.** I checked before claiming it:
+`/proc/net/netstat` and `/proc/net/snmp` are kernel-generated in strict header/value pairs — on the live
+node, 6 and 12 lines, **zero blank lines, both even**. So unlike netclass #1915, where EKS pod churn hits
+the window routinely, there is no mechanism here that produces a blank line. **This is a robustness gap
+found by adversarial testing, not a field bug**, and it is labelled that way in the code comment, the
+test comment and this journal so nobody later cites it as an observed outage. Fixed anyway: the cost is
+three lines, the collector parses a file whose format it does not control, and a panic takes the whole
+scrape down rather than degrading one collector.
+
+Negative control — removing the blank-line guard restores upstream's behaviour and **all five subcases
+fail**:
+```
+--- FAIL: TestParseNetStatsRejectsEmptyLines/leading_empty_line
+--- FAIL: .../empty_line_in_middle    --- FAIL: .../blank-only_file
+--- FAIL: .../whitespace-only_line    --- FAIL: .../trailing_empty_line
+```
+
+**Two more hardening changes in the same parser**, both of which turn silent corruption into an error:
+- a non-empty header not ending in `:` is now rejected. Upstream truncates the last character
+  regardless, so a malformed line silently files every metric under protocol `TcpEx` instead of
+  `TcpExt` — worse than an error, because it looks like data.
+- a repeated protocol block now *accumulates*. Upstream reassigns the inner map, discarding the first
+  block's fields.
+
+**And one divergence on the same reasoning as netclass:** upstream returns an error from `Update` on an
+unparseable value, which discards every protocol already collected. Here a bad value skips that one
+field. Partial data beats no data.
+
+### The netstat field filter is a cardinality decision, not a convenience
+
+`/proc/net/{netstat,snmp,snmp6}` expose several hundred counters; upstream's default allowlist selects
+~60. Both halves are asserted — the ~30 fields it must **keep** (what dashboards join on) and the bulk it
+must **drop** — plus that the pattern is `^...$` anchored, because unanchored it would let hundreds
+through and the collector would still "work". Live: **42 series**.
+
+`UntypedValue` is preserved deliberately and the reason is now recorded: these fields mix cumulative
+counters with instantaneous gauges (`Tcp_CurrEstab` is a current connection count), and upstream does not
+distinguish them. Typing them all as counters would make `rate()` lie about the gauges.
+
+### softnet: why the per-CPU cardinality is worth paying for
+
+`node_softnet_dropped_total` and `times_squeezed_total` are the two counters that expose packet loss in
+the kernel receive path — backlog overflow, or NAPI running out of budget before draining the queue. On a
+node running hundreds of pods behind the VPC CNI that is a real and otherwise invisible failure mode.
+Live: **224 series** (7 metrics × 32 CPUs).
+
+The column mapping is asserted against decoded fixture values because a swap between `dropped` and
+`times_squeezed` would report packet loss as CPU scheduling pressure, and both metrics would still exist
+with plausible numbers. **CPU 1 is the only fixture row with more than one non-zero column**
+(`processed=0xdfb82=916354, dropped=0x29=41, squeezed=0xa=10`), which makes it the row that catches a
+swap; CPU 0 has the inverse pattern (`dropped=0, squeezed=1`) and catches a swap in the other direction.
+
+**Caught a wrong constant in my own test before trusting it:** I wrote `299129` for CPU 0's `processed`
+from memory; decoding the fixture gave `299641`. Verified every asserted hex value against the fixture
+with `awk strtonum` rather than by eye.
+
+`backlog_len` is the only gauge (a queue depth, up and down), asserted individually against the protobuf
+type rather than inferred.
+
+### udp_queues: four series, three-way error distinction
+
+The whole subject is the error handling, and it is preserved exactly:
+```
+IPv6 file absent   -> report v4, say nothing about v6, NOT a failure
+both files absent  -> ErrNoData
+any other error    -> a real failure
+```
+Collapsing "IPv6 is disabled" into either a failure or a silent success is wrong in **opposite**
+directions: the first alerts on a normal configuration, the second hides a genuinely broken procfs. On a
+v4-only EKS cluster the "IPv6 absent" branch is the **common** path, not an edge case — which is why four
+series get eight tests. The unreadable-vs-absent distinction gets its own test: absent means IPv6 is
+disabled, unreadable means something is wrong.
+
+### Live validation — every collector on a real host
+
+```
+cpu 320   netclass 150   softnet 224   netdev 128   filesystem 63
+meminfo 49   netstat 42   diskstats 18   vmstat 7   stat 6   udp_queues 4   loadavg 3
+SET(12)  total 1014 series  0 errors  0 nodata
+```
+
+**Gates:** coverage 100.0% · race clean · vet clean · staticcheck clean · 186 tests (was 147) ·
+`.covignore` untouched.
+
+**Progress: 12 of 39** — `loadavg`, `meminfo`, `cpu`, `vmstat`, `stat`, `filesystem`, `netdev`,
+`netclass`, `diskstats`, `netstat`, `softnet`, `udp_queues`.
+
+**Upstream defects found so far: 4** — filesystem data race, vmstat malformed-line panic, netclass
+#1915/#1841 (the only one reachable in the field on EKS), netstat empty-line panic (robustness only).
+
+**Next:** `sockstat`, `arp`, `conntrack` to finish the `/proc/net` group.
+
+---
