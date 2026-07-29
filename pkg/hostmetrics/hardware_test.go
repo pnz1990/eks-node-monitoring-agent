@@ -806,11 +806,7 @@ func gatherLabelled(t *testing.T, c Collector, labelName string) map[string]map[
 		if out[name] == nil {
 			out[name] = map[string]float64{}
 		}
-		if pb.Counter != nil {
-			out[name][key] = pb.GetCounter().GetValue()
-			continue
-		}
-		out[name][key] = pb.GetGauge().GetValue()
+		out[name][key] = metricValueOf(t, &pb)
 	}
 	return out
 }
@@ -845,11 +841,7 @@ func gatherAllLabels(t *testing.T, c Collector) map[string]map[string]float64 {
 		if out[name] == nil {
 			out[name] = map[string]float64{}
 		}
-		value := pb.GetGauge().GetValue()
-		if pb.Counter != nil {
-			value = pb.GetCounter().GetValue()
-		}
-		out[name][strings.Join(parts, ",")] = value
+		out[name][strings.Join(parts, ",")] = metricValueOf(t, &pb)
 	}
 	return out
 }

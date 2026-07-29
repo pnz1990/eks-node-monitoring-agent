@@ -1489,3 +1489,166 @@ values while nothing complained. Asserted as `39 metrics must read 39 distinct f
 it must FAIL rather than succeed emptily — the inverse of everything else in this group.
 
 ---
+## N3 COMPLETE — 39 of 39 collectors
+
+Final batch: `powersupplyclass`, `watchdog`, `mdadm`, `infiniband`, `dmmultipath`, `btrfs`, `textfile`,
+`hwmon`.
+
+### `hwmon`: the one collector whose parity requirement is that it must FAIL
+
+Every other hardware collector reports `success=1` with zero series on EKS. `hwmon` reports `success=0`,
+because `/sys/class/hwmon` does not exist on an EC2 guest and upstream returns `ErrNoData` rather than
+`nil`. On the live cluster it is **the only zero**. So the plausible tidy-up — *"why does this one fail?
+make it return nil like the others"* — would be a parity BREAK on every node. Pinned with a test that
+says so.
+
+Also preserved verbatim, with upstream's reasoning: `hwmon` reads sysfs with a raw `unix.Read` rather
+than `os.ReadFile`, because **some hwmon drivers return EAGAIN and make `os.ReadFile` poll forever**.
+That is a hang in a scrape path, not an inefficiency.
+
+### Three upstream defensive guards, and only one of them can fire
+
+I checked each rather than keeping all three as permanently-uncovered code:
+
+```
+i >= len(matches) in the SubexpNames loop  -> UNREACHABLE. FindStringSubmatch always returns
+                                              exactly 1+NumSubexp entries and SubexpNames has the
+                                              same length (verified: 4 groups, both length 5).
+n < 0 after unix.Read                      -> UNREACHABLE. unix.Read converts a negative syscall
+                                              return into a non-nil error.
+strconv.Atoi on the id group               -> REACHABLE. The group is [0-9]* with NO length bound,
+                                              so "temp99999999999999999999999_input" parses as
+                                              digits and OVERFLOWS int. Verified: ok=false.
+```
+
+The two unreachable ones are dropped with the proof recorded in a comment; the reachable one is kept and
+tested end to end (the overflowing sensor is skipped, not wrapped to `temp0`). **A guard that cannot fire
+is not protection — it is noise that hides the guards that can.**
+
+### `powersupplyclass`: three scale factors, and a bug of mine the golden caught
+
+49 numeric fields across three scale groups (raw, `/1e6`, `/10`), generated from upstream's source and
+diffed **with divisors**: `49/49 identical`, plus `12/12` info labels and `7/7` watchdog fields.
+
+**My bug:** I wrapped every read error as a failure. Upstream distinguishes them — a **missing**
+`/sys/class/power_supply` is `ErrNoData`, an unreadable one is a failure. On EC2 the directory **exists
+and is empty**, which is why the cluster golden shows `success=1`. My version would have reported
+`success=0` on any host genuinely lacking it. Both branches now have tests, because neither can be
+collapsed into the other.
+
+### The unit-convention matrix is now six deep, and two of them are 100x apart
+
+```
+pressure          MICROseconds   /1e6
+schedstat         NANOseconds    /1e9
+timex offset      MICRO or NANO  -- depends on the STA_NANO status BIT
+timex freq        16-bit PPM     /(1e6 * 65536), and +1 because it is a ratio
+diskstats         512-byte sectors  (NOT the device block size)
+btrfs commits     MILLIseconds   /1000
+powersupply temp  DECI-degrees   /10     <-- these two sit in adjacent files
+thermal_zone temp MILLI-degrees  /1000   <-- and are 100x apart
+hwmon temp        MILLI-degrees  /1000
+hwmon fan         RPM            no conversion at all
+infiniband lifespan MILLIseconds /1000, and the only conversion among 63 metrics
+```
+
+`TestUnitConventionsAreAllDistinctAndCorrect` asserts the whole matrix so the DIFFERENCES are the
+subject, not each value in isolation.
+
+### `mdadm`: an upstream label/key mismatch reproduced rather than "fixed"
+
+`node_md_state` is emitted five times per device from five descriptors with different constant labels,
+each read from a map keyed by the `ActivityState` string. **Two of those keys do not match their label:**
+
+```
+label "resync" <- stateVals["resyncing"]
+label "check"  <- stateVals["checking"]
+```
+
+Verified mechanically against upstream's source. Making them "consistent" would leave
+`node_md_state{state="resync"}` permanently **0 on a device that IS resyncing** — exactly when someone is
+looking at it. Reproduced, and the mismatch is asserted so a future tidy-up fails loudly.
+
+### `dmmultipath`: two words for one healthy state
+
+`isPathActive` accepts **both** `"running"` (SCSI) and `"live"` (NVMe). Handling only `"running"` would
+count every NVMe path as FAILED — a metric reporting total path failure on a healthy machine, which is
+worse than no metric. Also `device_active` is **inverted** from the struct's `Suspended` field, and
+`active + failed` always equals the path count, so a path in an unrecognised state counts as failed
+rather than vanishing. An unknown state is not evidence of health.
+
+### The single largest deliberate parity gap: btrfs ioctl device stats
+
+Upstream reports per-device btrfs stats two ways. Only the **procfs** path is ported, so three families
+are absent on a btrfs host: `device_unused_bytes`, `device_errors_total{type=...}`, and the
+`btrfs_dev_uuid` label. Reasons, recorded rather than glossed:
+
+- the ioctl path needs `CAP_SYS_ADMIN`, which the shipped DaemonSet does not have — so on the actual
+  deployment target it would fail and fall back to procfs anyway
+- it pulls in `github.com/dennwc/btrfs` for metrics unreachable in our deployment
+- **zero** btrfs filesystems exist on any EKS node, so the gap is currently unobservable — which is an
+  argument for deferring it, NOT for pretending it does not exist
+
+Bounded at ~80 lines plus the dependency if a customer ever needs it.
+
+### Three test-helper bugs of the same family, all mine
+
+```
+gatherAllLabels     read GetCounter() only -> every GAUGE silently read as 0
+gatherLabelled      same
+drainMixed          read gauge+counter only -> every UNTYPED metric silently read as 0
+```
+
+The third one presented as *"the textfile collector dropped the value"* and sent me reading the
+collector; the collector was correct. All three now go through one `metricValueOf` helper that **fails
+the test** on a type it does not understand rather than returning 0. **A test helper that returns a
+plausible zero for an entire metric type is worse than one that panics** — it reads as a real failure and
+sends you looking in the wrong place.
+
+Also corrected four wrong expectations of my own: `cleanMetricName("__a  b__")` is `a__b` not `a_b` (Trim
+strips only the ENDS), `explodeHwmonSensorFilename("")` returns `false` not `true` (the type group needs
+a non-digit), the humidity metric is `node_hwmon_humidity` not `_humidity_input`, and
+`450000/1e6` needs `InDelta` because it is `0.44999999999999996` in float64.
+
+### `textfile`: partial families are load-bearing
+
+Upstream processes the parsed families **before** checking the parse error, and that is deliberate:
+`expfmt` returns the families it managed to parse **alongside** the error. Verified directly — a file
+with `good_metric 7` followed by a malformed line yields 2 families and an error. My first version
+checked the error first and discarded them, losing every valid metric in a file with one bad line.
+
+Also: a zero-valued `expfmt.TextParser` **panics** with "Invalid name validation scheme requested: unset"
+in `prometheus/common` v0.70. `var parser expfmt.TextParser` compiles, looks idiomatic, and crashes on
+the first file. Upstream passes `model.LegacyValidation` explicitly.
+
+### Live validation — all 39 collectors
+
+```
+cpu 320  softnet 224  netclass 150  netdev 128  schedstat 96  thermal_zone 64  filesystem 63
+meminfo 49  netstat 42  xfs 39  sockstat 20  diskstats 18  timex 17  conntrack 10  time 7
+vmstat 7  nvme 6  stat 6  pressure 5  udp_queues 4  os 3  selinux 3  loadavg 3  arp 2
+entropy 2  filefd 2  dmi 1  textfile 1  uname 1
+zero-series successes: btrfs cpufreq dmmultipath edac mdadm powersupplyclass watchdog
+nodata (success=0):    hwmon infiniband kernel_hung
+
+TOTAL 39 collectors, 1293 series, 0 failures
+```
+
+The three `nodata` results are all correct and none is a divergence: `hwmon` and `infiniband` have no
+such hardware on any EC2 instance (and the cluster golden shows `hwmon` at `success=0` too), while
+`kernel_hung` needs kernel 6.7 — this dev host is 6.12 without the file, and the EKS node is 6.18 with
+it.
+
+**Gates:** coverage **100.0%** · race clean · vet clean · staticcheck clean · no-dependency gate PASS
+with passing self-test · **529 tests** · `.covignore` untouched.
+
+**N3 IS COMPLETE: 39 of 39.**
+
+**Upstream defects found: 5** (2 reachable in the field on EKS, 3 robustness gaps found by adversarial
+testing). Deliberate parity exceptions: 4, all recorded in `docs/parity-exceptions-nodep.md`.
+
+**Next:** N5 three-way deployment (pne 9100, nma-dep 9101, nma-nodep 9102), N6 three-way validation of
+metrics AND logs, N7 stress/load across all three, N8 the design doc with a recommendation between the
+two approaches.
+
+---

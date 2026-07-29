@@ -486,7 +486,16 @@ func gatherTimeMetrics(t *testing.T, c Collector) map[string]float64 {
 	return drainMixed(t, ch)
 }
 
-// drainMixed reads a closed channel of gauges and/or counters.
+// drainMixed reads a closed channel of gauges, counters or UNTYPED metrics.
+//
+// The untyped case is not hypothetical: netstat emits UntypedValue throughout, and a
+// textfile *.prom line with no "# TYPE" is parsed as untyped too. An earlier version
+// handled only gauges and counters, so every untyped metric silently read as 0 -- which
+// presented as "the collector dropped the value" and sent me looking at the collector.
+//
+// THIRD instance of this helper-bug family (gatherAllLabels read counters only;
+// gatherLabelled likewise). A test helper that returns a plausible zero for an entire
+// metric type is worse than one that panics.
 func drainMixed(t *testing.T, ch chan prometheus.Metric) map[string]float64 {
 	t.Helper()
 
@@ -494,11 +503,26 @@ func drainMixed(t *testing.T, ch chan prometheus.Metric) map[string]float64 {
 	for m := range ch {
 		var pb dto.Metric
 		require.NoError(t, m.Write(&pb))
-		if pb.Counter != nil {
-			out[metricName(t, m)] = pb.GetCounter().GetValue()
-			continue
-		}
-		out[metricName(t, m)] = pb.GetGauge().GetValue()
+		out[metricName(t, m)] = metricValueOf(t, &pb)
 	}
 	return out
+}
+
+// metricValueOf extracts the value regardless of metric type.
+//
+// Fails the test on a type it does not understand, rather than returning 0: a silent
+// zero is the bug this function exists to prevent.
+func metricValueOf(t *testing.T, pb *dto.Metric) float64 {
+	t.Helper()
+
+	switch {
+	case pb.Gauge != nil:
+		return pb.GetGauge().GetValue()
+	case pb.Counter != nil:
+		return pb.GetCounter().GetValue()
+	case pb.Untyped != nil:
+		return pb.GetUntyped().GetValue()
+	}
+	t.Fatalf("metric has no gauge, counter or untyped value: %v", pb)
+	return 0
 }
