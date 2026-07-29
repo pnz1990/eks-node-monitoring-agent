@@ -129,3 +129,24 @@ func TestEnabledCollectorNamesSorted(t *testing.T) {
 	require.Len(t, names, 2)
 	assert.Equal(t, []string{"cpu", "loadavg"}, names, "names must be sorted for deterministic logging")
 }
+
+func TestApplyEKSDefaultsPreservesOperatorPrecedence(t *testing.T) {
+	// kingpin is last-wins, so defaults must come first for an operator flag to
+	// override them. If this order ever flips, user configuration is silently
+	// ignored.
+	got := metrics.ApplyEKSDefaultsForTest([]string{"--collector.netclass.ignored-devices=^custom$"})
+	require.NotEmpty(t, got)
+	assert.Equal(t, "--collector.netclass.ignored-devices=^custom$", got[len(got)-1],
+		"operator flags must be last so they win")
+}
+
+func TestEKSDefaultsAreEmptyToPreserveParity(t *testing.T) {
+	// Guards a deliberate decision: two candidate defaults were measured and both
+	// changed the metric surface (netclass exclusion loses
+	// node_network_speed_bytes; netclass netlink adds node_network_altnames_info).
+	// The resilience layer already contains the failure they would mitigate, so
+	// strict parity wins. Adding a default here without re-running
+	// hack/parity-test.sh would regress parity silently.
+	assert.Empty(t, metrics.ApplyEKSDefaultsForTest(nil),
+		"adding an EKS default changes the metric surface; re-run hack/parity-test.sh and update docs/parity-exceptions.md")
+}

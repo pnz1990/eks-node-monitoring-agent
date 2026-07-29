@@ -119,7 +119,9 @@ type registerFunc func(prometheus.Registerer, *collector.NodeCollector, time.Dur
 func newServer(logger *slog.Logger, opts Options, resolve resolveFunc, newCollector collectorFunc, register registerFunc) (*Server, error) {
 	opts = opts.withDefaults()
 
-	args := append(HostPathArgs(opts.HostRoot), opts.UpstreamArgs...)
+	// Order matters: EKS defaults first, then host paths, then the operator's own
+	// flags last so they take precedence (kingpin is last-wins).
+	args := applyEKSDefaults(append(HostPathArgs(opts.HostRoot), opts.UpstreamArgs...))
 	if err := resolve(args); err != nil {
 		return nil, err
 	}

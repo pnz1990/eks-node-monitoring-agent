@@ -316,3 +316,115 @@ keep the rest). Worth filing, but not something to carry as a fork patch.
 any metric a real dashboard uses.
 
 ---
+## [2026-07-29T00:15Z] EKS collector defaults — parity regression found, scope narrowed
+
+**Phase:** P2 triage
+**Status:** fixed (scope narrowed after measurement)
+
+**What I did:** Implemented `eksCollectorDefaults` excluding pod-side interfaces from netclass/netdev,
+then ran the parity harness. Then probed a real EKS node to check the assumption.
+
+**What I observed — the defaults BROKE parity:**
+```
+$ hack/parity-test.sh --upstream ... --agent ...
+-TYPE node_network_speed_bytes gauge      # lost, 1 metric name
+```
+Exactly one metric name lost, zero gained.
+
+First hypothesis was `--collector.netclass.ignore-invalid-speed`. Removing it **did not fix it**, so the
+hypothesis was wrong. The real cause is the interface exclusion itself.
+
+Dev host (`/sys/class/net`):
+```
+br-4bf631fc931d speed=10000    excluded
+docker0         speed=-1       excluded
+veth*           speed=10000    excluded  (x3)
+eth0            speed=unreadable  KEPT
+lo              speed=unreadable  excluded
+```
+Only `eth0` survives, and its speed is unreadable → the family disappears.
+
+**Then I checked a real EKS node rather than trusting the dev box:**
+```
+enib38dc4367fe speed=10000     <- excluded by my regex (eni pod-side half)
+enid027c7c99a9 speed=10000     <- excluded
+ens5           speed=unreadable   KEPT (primary ENI)
+ens6           speed=unreadable   KEPT
+lo             speed=unreadable   excluded
+```
+
+**Conclusion:** the regression is real on EKS too, not a dev-host artifact. On an EKS node the *only*
+interfaces that report a link speed are the `eni*` pod-side halves; the primary `ens*` interfaces do
+not expose a readable speed. So excluding pod interfaces removes `node_network_speed_bytes` entirely.
+
+**Correction to my own earlier claim:** I wrote in `collectors.go` that these exclusions "do not change a
+metric a dashboard would use." That was wrong, and measurement caught it. `node_network_speed_bytes`
+is a real metric that disappears.
+
+**Disposition — narrow the default rather than abandon it:**
+- The churn hazard (#1915) comes from *device count and volatility*, which `veth*`/`eni*` drive.
+- But excluding them from **netdev** is unnecessary for that hazard: netdev reads `/proc/net/dev`, a
+  single file, so it has no listing→read race and no per-device cost.
+- Keep the exclusion for **netclass only** (where the per-device sysfs read is the actual problem), and
+  do not exclude for netdev. That preserves netdev's device label space.
+- `node_network_speed_bytes` comes from **netclass**, so it is still affected. Trade-off must be stated
+  explicitly rather than hidden: on EKS this metric only ever describes pod-side interfaces, whose link
+  speed is not a meaningful node signal. Document it as an intentional deviation in
+  `docs/parity-exceptions.md` and leave an override path.
+
+**Next:** narrow to netclass-only, re-run parity, document the deviation honestly, then continue triage
+with #1710 cpufreq.
+
+---
+## [2026-07-29T00:40Z] Decision: no EKS collector defaults — parity beats redundant mitigation
+
+**Phase:** P2 triage
+**Status:** fixed (decided)
+
+**What I did:** Measured both candidate mitigations for #1915/#1841 against the parity harness.
+
+**What I observed:**
+
+| Option | Parity result |
+|---|---|
+| `--collector.netclass.ignored-devices=<pod ifaces>` | **297** names vs upstream 298 — loses `node_network_speed_bytes` |
+| `--collector.netclass.netlink` | **299** names vs upstream 298 — adds `node_network_altnames_info` |
+| No defaults | **298 / 298, empty diff** |
+
+Verified on a live EKS node why the exclusion costs a metric: the only interfaces exposing a readable
+link speed are the pod-side `eni*` halves (`speed=10000`); the primary `ens5`/`ens6` report an
+unreadable speed. So excluding pod interfaces removes the family entirely.
+
+**Conclusion — ship no defaults.** The reasoning that decided it:
+
+R2 (per-collector timeout, already implemented) *already contains* the failure these defaults would
+prevent. A netclass stall now degrades one collector for one scrape instead of hanging the endpoint. So
+the defaults would buy redundant protection at the cost of a real, measurable parity regression — a bad
+trade, given parity is the whole premise of replacing PNE.
+
+Both options are documented with copyable flags for operators on churn-heavy clusters, where the
+trade may be worth making locally.
+
+**Two invariant tests added** so this decision cannot be undone silently:
+- `TestApplyEKSDefaultsPreservesOperatorPrecedence` — defaults must precede operator flags, since
+  kingpin is last-wins. If the order flips, user configuration is silently ignored.
+- `TestEKSDefaultsAreEmptyToPreserveParity` — fails if anyone adds a default without re-running the
+  parity harness.
+
+**Meta-observation worth keeping:** I nearly shipped a mitigation that traded a real metric for
+protection I had already built. What caught it was running the parity harness on every change rather
+than only at the end. Two of my hypotheses along the way were also wrong (first blamed
+`ignore-invalid-speed`, then assumed the dev host was representative) — both corrected by measuring
+instead of reasoning.
+
+**Status of the four HIGH/MED bugs:**
+| Issue | Disposition |
+|---|---|
+| #1841 netclass timeouts | **Contained by R2.** Optional mitigation documented. |
+| #1915 netclass all-or-nothing | **Contained by R2**, root cause reproduced and documented. Upstream fix belongs upstream. |
+| #1710 cpufreq ParseUint | **Not yet triaged** |
+| #1672 filesystem impossible values | **Not yet triaged** |
+
+**Next:** triage #1710 cpufreq and #1672 filesystem.
+
+---

@@ -109,3 +109,50 @@ func HostPathArgs(hostRoot string) []string {
 		"--path.udev.data=" + trimmed + "/run/udev/data",
 	}
 }
+
+// eksCollectorDefaults are upstream collector flags applied before the operator's
+// own, so an explicit flag always wins (kingpin is last-wins).
+//
+// It is deliberately EMPTY. Two candidate defaults were measured against the
+// parity harness and both changed the metric surface, so neither is applied:
+//
+//   --collector.netclass.ignored-devices=<pod interfaces>
+//       Mitigates #1915/#1841 by not reading pod-side veth/eni interfaces, which
+//       is where the churn and the per-device sysfs cost come from. But on an EKS
+//       node the ONLY interfaces reporting a link speed are those pod-side
+//       halves (verified on a live node: eni* report speed=10000 while the
+//       primary ens5/ens6 report an unreadable speed), so excluding them removes
+//       node_network_speed_bytes. Measured: 297 metric names vs upstream's 298.
+//
+//   --collector.netclass.netlink
+//       Replaces the per-device sysfs walk with a single netlink query, removing
+//       the listing-then-read race without excluding anything. But it ADDS
+//       node_network_altnames_info. Measured: 299 names vs upstream's 298.
+//
+// Since the per-collector timeout and panic recovery in resilience.go already
+// contain the failure these would prevent, strict parity is the better default
+// and the mitigations are left to operators. Both are documented with copyable
+// flags in docs/prometheus-node-exporter-parity.md.
+var eksCollectorDefaults = []string{}
+
+// eksIgnoredNetDevices matches interfaces belonging to pods or the CNI rather than
+// to node networking. Not applied by default (see eksCollectorDefaults); exported
+// via documentation so operators can opt in on churn-heavy clusters.
+//
+//   - veth*/eni*   pod-side interface halves (VPC CNI and others)
+//   - lo           loopback; carries only the exporter's own scrape traffic
+//   - docker*/br-* container runtime bridges
+//   - cali*/cni*   Calico and generic CNI interfaces
+//   - tunl*        tunnel interfaces
+const eksIgnoredNetDevices = `^(veth.*|eni[0-9a-f]+|lo|docker[0-9]+|br-[0-9a-f]+|cali[0-9a-f]+|cni[0-9]+|tunl[0-9]+|nodelocaldns)$`
+
+// applyEKSDefaults prepends the EKS defaults to args so an operator's explicit
+// flags, which come later, take precedence.
+func applyEKSDefaults(args []string) []string {
+	return append(append([]string{}, eksCollectorDefaults...), args...)
+}
+
+// ApplyEKSDefaultsForTest exposes applyEKSDefaults to the external test package so
+// the parity-preserving invariant can be asserted without making the defaults
+// themselves part of the public API.
+func ApplyEKSDefaultsForTest(args []string) []string { return applyEKSDefaults(args) }
