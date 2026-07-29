@@ -126,3 +126,59 @@ scheduling. Fixed in both harnesses rather than left as a latent inverted guard.
 `ErrNoData`, meta metrics, native pflag config. Reuse `resilience.go` and `server.go` unchanged.
 
 ---
+## [2026-07-29T03:20Z] N2 — framework built, first collector ported, no kingpin
+
+**Phase:** N2 (framework) + start of N3 (collectors)
+**Status:** confirmed
+
+**What I did:** Built `pkg/hostmetrics/` — registry, config resolution, path handling, `ErrNoData`,
+`typedDesc` — then ported the first collector (`loadavg`) end to end to validate the whole pipeline
+before scaling up.
+
+**Design decisions taken here, with the reasoning:**
+
+1. **`register()` does NOT create a flag.** Upstream's `registerCollector` calls `kingpin.Flag()` during
+   `init()`, which is precisely why importing it dragged a second flag library into a pflag process.
+   Enablement is resolved from `Config` at construction time instead. **The kingpin bridge and its
+   `sync.Once` latch disappear entirely** — that was one of the stated gains of this branch and it is
+   already realised.
+
+2. **A collector that fails to construct is skipped, not fatal.** Upstream fails the entire set if any
+   factory errors. On a heterogeneous fleet some collectors genuinely cannot construct (no sysfs entry
+   for a device class, no permission), and refusing to serve *any* metrics because one subsystem is
+   absent is worse than serving the rest. But zero constructed collectors *is* an error, because an
+   endpoint serving nothing while looking healthy is worse than failing to start.
+
+3. **Unknown collector names fail at startup.** A typo must not silently produce a smaller metric set
+   that someone discovers when a dashboard is empty. The error lists the registered names so the
+   operator does not have to guess.
+
+4. **Duplicate registration panics at init.** A duplicate name would silently shadow a collector.
+
+5. **`typedDesc.mustNewConstMetric` keeps upstream's panic-on-mismatch.** Acceptable *only* because the
+   resilience layer recovers per-collector panics on the goroutine that raises them, so a label
+   mismatch degrades one collector rather than killing the agent. Without that guard this would be
+   unacceptable in library code, and the comment says so.
+
+**Provenance recorded per file** — upstream source file, commit `b401dcfc`, upstream copyright retained
+alongside ours, and a note of what differs. `loadavg` is the template for the remaining 48.
+
+**Test approach validated on `loadavg`:** upstream's own fixture (`fixtures/proc/loadavg`, verbatim) as
+ground truth, plus 11 adversarial cases upstream does not test — empty file, too few fields, the
+`<unknown>` placeholder shape from #1710, non-numeric fields, binary garbage, whitespace-only, extra
+fields, high precision, large values. Errors must name both the offending value *and* the file path, so
+an operator knows what to inspect.
+
+**Gates:**
+```
+pkg/hostmetrics coverage   100.0% of statements
+go test -race              clean
+staticcheck                clean
+gofmt / go vet             clean
+```
+
+**Next:** N3 — port the remaining 48 collectors in dashboard-value order, one at a time, each with
+fixtures copied, tests ported, and the three-way harness green for that collector before moving on. Not
+in bulk: a 10.6k-line commit that fails parity is undebuggable.
+
+---
