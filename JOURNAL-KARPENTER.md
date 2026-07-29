@@ -220,3 +220,101 @@ condition had cleared and Karpenter was never given anything to act on.
 the line every monitor period — and must assert the condition is *continuously* false for >30 min
 before claiming anything about replacement. Recorded as a required harness change rather than a
 finding about either fork.
+
+---
+
+## K3 — three-way comparison on Karpenter nodes: A1–A4 pass, one real defect found
+
+**Date:** 2026-07-29 · **Status:** A1–A4 complete; A5–A7 pending churn (K5)
+
+### K3.1 Topology actually verified, not assumed
+
+15 Karpenter nodes, 5 per pool, **exactly one agent per node and the correct variant per pool**:
+
+```
+pool=main   5 nodes -> nma-main-agent            (stock main, sha256:7f4c51ca)
+pool=dep    5 nodes -> eks-node-monitoring-agent (dependency fork, q9-v1)
+pool=nodep  5 nodes -> nma-nodep                 (native fork,     q9-v1)
+```
+
+### K3.2 FINDING F-K3-1 — 17 restarts on the native fork. **My deployment, not the code.**
+
+The first K3 run failed on `nodep` with **17 agent restarts** while `main` and `dep` had **0**.
+Uniform across all 5 pods (4 each), `exit=143` (SIGTERM), so systematic rather than random.
+
+Cause, from the kubelet event rather than guessed:
+
+```
+Liveness probe failed: Get "http://…:8002/healthz": connect: connection refused
+Killing: Container nma-nodep failed liveness probe, will be restarted
+```
+
+And from the agent's own log — it was starting **fine**:
+
+```
+"starting server" name="health probe" addr="[::]:8012"
+```
+
+**The DaemonSet passes `--probe-address=:8012` but its livenessProbe targets `:8002`.** A
+pre-existing misconfiguration in *my* `nma-nodep` test DaemonSet, carried from the three-way
+metrics work.
+
+**Why it never surfaced before:** on the MNG the pod was never restarted after the mismatch was
+introduced, and the metrics harness only ever checked `restartCount` at a moment when it happened
+to be 0. Karpenter launching **fresh nodes** made every pod start from scratch and immediately hit
+the probe. So Karpenter did not cause the defect — it **exposed** one that was latent.
+
+Fixed by pointing the probe at `:8012`. **17 restarts → 0**, verified.
+
+**Classification: HARNESS, not a fork defect.** It would be wrong to record this as "the native
+fork is unstable under Karpenter" — the binary was healthy the whole time and said so in its logs.
+But it is worth keeping visible, because a liveness probe aimed at a port nothing listens on is a
+**crash loop with a healthy process inside it**, and on a real deployment that would look exactly
+like an agent defect.
+
+### K3.3 A1–A4 results
+
+**A1 — condition TYPE sets identical.** 8 distinct types on every variant, all three pairs
+`IDENTICAL`:
+
+```
+ContainerRuntimeReady  DiskPressure  KernelReady  MemoryPressure
+NetworkingReady        PIDPressure   Ready        StorageReady
+```
+
+`AcceleratedHardwareReady` absent on all three (no accelerator), and **absent consistently** —
+which is the A1 claim, not a gap.
+
+**A2 — Fatal reason set.** No variant emitted any Fatal reason on a healthy node, so the observed
+Fatal set is empty and identical across all three. *Stated precisely: this confirms no variant
+emits a SPURIOUS Fatal at rest; it does not enumerate all 21 Fatal reasons, 16 of which need
+accelerated hardware.*
+
+**A3 — injected Fatal appears on all three.** `IPAMDNotReady` detected on every variant.
+
+**A4 — latency within 1 monitor period.** Identical to the second:
+
+```
+main   DETECTED after 15s
+dep    DETECTED after 15s
+nodep  DETECTED after 15s
+```
+
+Deadline was 360 s (`interfaceMonitorPeriod` + margin). **Neither fork delays condition
+reporting** — the hazard H3 concern (a *delayed* condition rather than an absent one) is not
+observed at rest. Churn is still to come in K5.
+
+**A6 (partial) — Karpenter's view.** All 15 `NodeClaims`
+`Launched/Registered/Initialized/Consolidatable/Ready=True`. Karpenter successfully launched,
+registered and initialised nodes with all three variants installed.
+
+**A7 — 0 orphaned `NodeDiagnostic`s** across 21 live nodes on every run.
+
+### K3.4 What K3 does NOT establish
+
+- **Repair execution.** Every condition here cleared on its own well inside Karpenter's
+  30-minute toleration (F-K1-1), so no repair was ever triggered. A5/A6-full need the sustained
+  injector.
+- **Behaviour under churn.** These are at-rest measurements. Consolidation churn is K5, and that is
+  where hazard H2 (veth churn vs Fatal `InterfaceNotUp`) actually lives.
+- **The Fatal reason set is not enumerated** — only shown to be empty at rest on all three.

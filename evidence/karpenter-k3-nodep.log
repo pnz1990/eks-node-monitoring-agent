@@ -1,0 +1,40 @@
+variant : nodep
+pool    : 5 node(s)
+agent DS: nma-nodep
+
+=== AGENT PRESENCE (a node with no agent is unmonitored, not healthy) ===
+  192-168-66-73.us-west-2.compute.internal           Running
+  192-168-75-137.us-west-2.compute.internal          Running
+  192-168-85-34.us-west-2.compute.internal           Running
+  192-168-87-190.us-west-2.compute.internal          Running
+  192-168-93-109.us-west-2.compute.internal          Running
+
+=== NODE CONDITIONS (types = A1, values = A5) ===
+  extracted 40 condition line(s) from 5 node(s)
+  ContainerRuntimeReady      present on 5/5 node(s), 0 not-True
+  KernelReady                present on 5/5 node(s), 0 not-True
+  NetworkingReady            present on 5/5 node(s), 0 not-True
+  StorageReady               present on 5/5 node(s), 0 not-True
+  AcceleratedHardwareReady   absent (expected: no accelerator on this instance type)
+
+=== KARPENTER VIEW (A6: does Karpenter consider these nodes healthy?) ===
+  nma-nodep-2qd7c        Launched=True Registered=True Initialized=True Consolidatable=True Ready=True 
+  nma-nodep-7h7zm        Launched=True Registered=True Initialized=True Consolidatable=True Ready=True 
+  nma-nodep-k6b9h        Launched=True Registered=True Initialized=True Consolidatable=True Ready=True 
+  nma-nodep-st8kh        Launched=True Registered=True Initialized=True Consolidatable=True Ready=True 
+  nma-nodep-xglr8        Launched=True Registered=True Initialized=True Consolidatable=True Ready=True 
+
+=== AGENT HEALTH (B5 errors/panics, B6 restarts) ===
+  pods=5  restarts=0
+  ERROR/FATAL/panic log lines: 0
+
+=== NodeDiagnostic CRs (A7: none orphaned) ===
+  nodediagnostics=0  live nodes=21
+
+VERDICT[nodep]: contract intact -- the 4 required NMA condition types present and True
+                   on all 5 node(s); AcceleratedHardwareReady on 0/5
+                   (absent is expected without an accelerator). Karpenter sees every
+                   NodeClaim Ready. 0 restarts, 0 error/panic lines, 0 orphaned
+                   NodeDiagnostics.
+
+                   NOT tested here: repair EXECUTION. This is condition publication only.
