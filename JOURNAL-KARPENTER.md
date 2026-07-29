@@ -555,3 +555,66 @@ observes one node, so a termination elsewhere has no recorded reason.
 for every node as it happens, so "a node went away" is never again a fact without a cause.
 Critically, this also means **A5 (no spurious Fatal) is not yet established** — a node was replaced
 without a known reason, and until that is attributable I cannot claim no spurious repair occurred.
+
+---
+
+## K5.4 — K5.3's "unattributed termination" RESOLVED, and it is the strongest result so far
+
+**The termination I could not attribute was attributable after all**, and reconstructing it turned a
+loose end into the central A5 result.
+
+Karpenter's own `"deleted node"` log lines, all three of them:
+
+```
+23:07:49Z  nodep  ip-192-168-66-73    <- K3-A4 injected IPAMDNotReady
+23:08:04Z  dep    ip-192-168-32-223   <- K3-A4 injected IPAMDNotReady
+23:08:24Z  main   ip-192-168-14-177   <- K3-A4 injected IPAMDNotReady
+```
+
+**Three terminations. Three injected faults. One per pool. Zero unexplained.**
+
+K3's A4 latency test injected `IPAMDNotReady` into `items[0]` of *each* pool to compare detection
+speed — and those are exactly the three node names Karpenter later repaired. So my earlier
+"a nodep node was terminated and I never injected a fault there" was **wrong**: I had injected one,
+in the A4 test, and then forgotten it while looking at the sustained-fault Job.
+
+### What this establishes
+
+**A3 / A6 — repair execution, on ALL THREE variants:**
+
+| pool | unhealthy before deletion | outcome |
+|---|---|---|
+| `main` | **32.0 min** (measured from `lastTransitionTime`) | repaired |
+| `dep` | ~21–31 min (injection-time estimate; node gone, so `lastTransitionTime` unavailable) | repaired |
+| `nodep` | ~21–31 min (same caveat) | repaired |
+
+The `main` figure is exact. The other two are estimates because the node objects were deleted and
+their `lastTransitionTime` went with them — **stated as an estimate rather than dressed up**, and it
+is a harness gap: the transition time must be captured *before* the node can disappear.
+
+**A5 — no spurious repair.** Across ~54 minutes, 21 nodes, 1,200 pod-churn completions and three
+pools, **every** termination maps to an injected fault. No healthy node was replaced.
+
+**H2 — did NOT fire, on any variant.** After 1,200 churn completions creating and destroying veths
+continuously, **zero** nodes on any pool reported `InterfaceNotUp`, `InterfaceNotRunning` or
+`MissingLoopbackInterface`:
+
+```
+H2 check across all Karpenter nodes: NONE
+```
+
+The two-adjacent-period guard (`interfaceHasConsistentIssue`) held under Karpenter-rate churn. This
+was the goal file's highest-suspicion hazard and the measured answer is that it does not reproduce —
+recorded as a negative result, which is worth as much as a positive one here.
+
+### The watcher's empty log was CORRECT, not broken
+
+`watch-terminations.sh` recorded nothing, which looked like the same "check that did not run"
+failure this project keeps producing. It was not: all three terminations happened at **23:07–23:08**
+and the watcher started at **23:12:40** — it was simply started too late. Verified by testing the
+detection logic against a synthetic diff (it correctly flags a disappearance) and by pulling the
+timestamps from Karpenter's log.
+
+**Lesson worth keeping:** an empty result from a *correct* check and an empty result from a *broken*
+check look identical, and the only way to tell them apart is to test the check itself. The watcher
+is now in place for K5 part 2, started before any fault.
