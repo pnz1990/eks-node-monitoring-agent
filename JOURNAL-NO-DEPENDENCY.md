@@ -1892,3 +1892,97 @@ Evidence captured in `evidence/three-way-validation.md`.
 **Remaining: N7 stress/load across all three, N8 the design doc with a recommendation.**
 
 ---
+## N7 COMPLETE — stress and load across all three, and a finding about the OTHER branch
+
+Pressure: pod churn + mount churn + CPU saturation, **20 → 70 pods** on 2x t3.large. All
+three variants measured in the SAME scrape pass from one pod, so a difference cannot be an
+artefact of sampling them minutes apart under different load.
+
+```
+                 series      failed   collect-time   panics  timeouts
+baseline  pne       772          10       0.0123s         0         0
+          nma-dep   726          10       0.9114s         0         0
+          nma-nodep 706           1       0.0181s         0         0
+pressure  pne       773          10       0.0215s         0         0
+          nma-dep   727          10       0.3446s         0         0
+          nma-nodep 707           1       0.0135s         0         0
+
+restarts: 0 / 0        new collector failures: 0        panics: 0        timeouts: 0
+```
+
+**VERDICT: all three held.** No new collector failures under pressure, no panics, no
+timeouts, no restarts. Series counts rose by exactly 1 on each variant (a veth appearing),
+which is the churn being visible rather than a defect.
+
+### The `failed` column is 1 vs 10, and that is entirely scope
+
+```
+pne       : bcachefs bonding fibrechannel hwmon ipvs nfs nfsd rapl tapestats zfs
+nma-dep   : bcachefs bonding fibrechannel hwmon ipvs nfs nfsd rapl tapestats zfs
+nma-nodep : hwmon
+```
+
+The 9 extra are the out-of-scope collectors, which the native variant does not register at
+all rather than registering and failing. **hwmon is the only overlap, and it fails on all
+three** — the inversion holding under pressure too.
+
+### FINDING F-N7-1: the DEPENDENCY branch has a per-collector latency floor
+
+The native variant is **~15x faster over the 39 collectors BOTH run** — 0.0210s vs 0.3288s
+under pressure, and 0.0181s vs 0.9114s at baseline. That is the opposite direction from the
+concern I was testing for, and large enough that "we're faster" is not an acceptable place
+to stop.
+
+Comparing only the shared 39 matters: comparing totals would credit the native variant for
+running 10 fewer collectors, which is scope, not performance.
+
+**What the distribution shows.** The per-collector times on nma-dep are not spread like
+real work — they cluster near a floor:
+
+```
+                  min         median      max        n
+nma-dep      0.000480s    0.013858s   0.077918s     49
+nma-nodep    0.000011s    0.000122s   0.007148s     39
+pne          0.000008s    0.000054s   0.004424s     49
+```
+
+nma-dep's **median is ~250x** nodep's and ~256x pne's, and under pressure its *minimum*
+rose to 0.0049s against pne's 0.000009s. A floor, not slowness in any particular collector:
+`time`, `nvme`, `textfile`, `netdev`, `diskstats` and `dmmultipath` all land within a
+whisker of each other despite doing wildly different amounts of work.
+
+**Partial cause, and the honest limit of it.** The dependency branch's relay channel is
+**unbuffered** (`make(chan prometheus.Metric)`); the native one is buffered at 1024. So
+every metric requires a goroutine handoff. I benchmarked exactly that difference in
+isolation:
+
+```
+n=20   unbuffered=7µs    buffered=2µs    3.8x
+n=150  unbuffered=26µs   buffered=7µs    3.8x
+n=320  unbuffered=58µs   buffered=15µs   3.9x
+```
+
+**~4x, not ~250x.** So the channel is a real contributor and NOT the whole story, and I am
+recording that rather than asserting a cause I have not established. Ruled out: CPU limits
+(both agents have identical 250m/200Mi), and CPU contention (the gap is *larger* at
+baseline, with no saturation running).
+
+**Why this matters and where it goes.** It is a finding about the *dependency* branch, which
+is the variant currently defaulted to and the one with the completed 298/298 parity run. At
+0.9s of summed collection time it is nowhere near a 15s scrape interval, so it is not
+breaking anything today — but it is ~70x pne's cost for the same data, and that is a real
+operational difference at fleet scale. Logged as **Q8 in OPEN-QUESTIONS.md**: fix the relay
+buffer on that branch and re-measure, because the remaining factor should be identified
+before either variant is recommended on performance grounds.
+
+I have deliberately NOT changed the dependency branch's buffer as part of this work: it
+would invalidate the 298/298 parity evidence that branch already carries, and the
+comparison it exists for.
+
+Evidence in `evidence/three-way-stress.md`. Cleanup runs on exit including on failure —
+leaving a CPU-saturation DaemonSet on a billed cluster is the kind of thing noticed on the
+invoice.
+
+**Remaining: N8, the design doc with a recommendation.**
+
+---
