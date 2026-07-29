@@ -17,9 +17,10 @@
 #
 # WHAT IS MEASURED, and why each matters
 #
-#   scrape latency        node_scrape_collector_duration_seconds, summed per variant.
-#                         The native variant has no reason to be slower -- it reads the
-#                         same files -- so a large gap means a structural problem.
+#   scrape latency        MEASURED AS WALL TIME (curl's total time), not as the sum of
+#                         node_scrape_collector_duration_seconds. See the warning below --
+#                         summing that metric across concurrent collectors overstates cost
+#                         by roughly the collector count, and this script used to do it.
 #   series stability       total series before vs during. A collector that loses devices
 #                         under churn shows here and nowhere else.
 #   collector failures     node_scrape_collector_success == 0 count. Must not GROW under
@@ -31,6 +32,46 @@
 #
 # CRITICALLY: the three are measured in the SAME scrape pass, from one pod, so a
 # difference cannot be an artefact of measuring them minutes apart under different load.
+#
+# ---------------------------------------------------------------------------------------
+# CORRECTED 2026-07-29: DO NOT SUM node_scrape_collector_duration_seconds
+# ---------------------------------------------------------------------------------------
+#
+# An earlier version of this script summed that metric per variant and reported the total
+# as "collection cost". That produced FINDING F-N7-1 -- "the dependency branch is ~15x
+# slower than native, median ~250x" -- which was recorded as a real but unexplained
+# performance gap (Q8). It was neither.
+#
+# THE METRIC MEASURES WALL TIME, AND EVERY COLLECTOR RUNS CONCURRENTLY. With fewer usable
+# cores than collectors, each collector's timer keeps running while its goroutine is
+# descheduled, so all of them report roughly the same wall-clock window -- the batch's,
+# not their own. Summing N concurrent measurements of the same window multiplies the real
+# cost by up to N.
+#
+# Demonstrated in pkg/metrics (Q8 investigation, GOMAXPROCS swept 1..8):
+#
+#     GOMAXPROCS=1   dep sum=0.5552s  min=0.010862s med=0.011322s max=0.011806s
+#                        ^ a 1.09x spread across 49 collectors doing wildly different
+#                          work. That is one shared window reported 49 times, not 49
+#                          similar measurements.
+#     GOMAXPROCS=8   dep sum=0.0620s  min=0.000028s med=0.001314s max=0.005501s
+#
+# The same 49 collectors run SERIALLY through the same resilient wrapper cost 0.0166s in
+# total, against the 0.9114s this script once reported. A ~55x overstatement.
+#
+# And the decisive check: WALL time is nearly identical between the two implementations
+# (0.0121s dep vs 0.0110s native at GOMAXPROCS=1). There was never a ~250x gap.
+#
+# So: latency is measured below as the wall time of the HTTP request. The summed metric is
+# still reported, clearly labelled, because it is what a Prometheus user would naively
+# compute and the label is what stops the next person repeating the mistake.
+#
+# WHAT WAS REAL: both agents are capped at cpu=250m (the CHART DEFAULT) and are genuinely
+# CPU-throttled -- measured from the cgroup, nma-dep 5124 throttle periods / 337.9s
+# throttled, nma-nodep 2007 / 140.1s, pne unlimited and never throttled. That is a real
+# finding about the shipped default, and it is NOT what produced the numbers above:
+# raising the limit 8x (250m -> 2 cores) moved the reported median from 7.72ms to 8.06ms,
+# i.e. not at all.
 
 set -euo pipefail
 
@@ -57,8 +98,11 @@ scrape_all() {
   local phase="$1"
   local pod="stress-scrape-$phase-$RANDOM"
 
+  # -w '%{time_total}' captures the WALL time of the scrape, which is the honest cost
+  # measure (see the header). Emitted on its own marker line so the parser cannot confuse
+  # it with a metric.
   kubectl run "$pod" --restart=Never --image="$CURL_IMAGE" --command -- \
-    sh -c "for p in 9100 9101 9102; do echo \"===PORT \$p===\"; curl -s --max-time 40 http://$ip:\$p/metrics; done" \
+    sh -c "for p in 9100 9101 9102; do echo \"===PORT \$p===\"; curl -s -o /tmp/m --max-time 40 -w '===WALL \$p %{time_total}===\n' http://$ip:\$p/metrics; cat /tmp/m; done" \
     >/dev/null 2>&1
 
   for _ in $(seq 90); do
@@ -75,6 +119,7 @@ scrape_all() {
     /^===PORT 9100===$/ { f=out"/"ph"-pne.prom"; next }
     /^===PORT 9101===$/ { f=out"/"ph"-nma-dep.prom"; next }
     /^===PORT 9102===$/ { f=out"/"ph"-nma-nodep.prom"; next }
+    /^===WALL / { print $2" "$3 > (out"/"ph"-wall.txt"); next }
     f { print > f }
   ' "$OUT/$phase-raw.txt"
 
@@ -94,20 +139,33 @@ report() {
   local phase="$1"
   log ""
   log "  --- $phase ---"
-  printf '  %-11s %8s %8s %9s %8s %9s\n' variant series failed "latency" panics timeouts
+  printf '  %-11s %8s %8s %9s %9s %8s %9s\n' variant series failed "wall" "sum(cc)" panics timeouts
   for v in pne nma-dep nma-nodep; do
-    local f="$OUT/$phase-$v.prom"
-    local series failed latency panics timeouts
+    local f="$OUT/$phase-$v.prom" port wall
+    local series failed summed panics timeouts
+    case "$v" in
+      pne) port=9100 ;; nma-dep) port=9101 ;; nma-nodep) port=9102 ;;
+    esac
     series=$(grep -cv '^#' "$f" || true)
     failed=$(awk '/^node_scrape_collector_success/ && $2==0' "$f" | wc -l)
-    # Summed rather than maxed: the max is one slow collector, the sum is the scrape's
-    # total collection cost, which is what a scrape interval has to accommodate.
-    latency=$(awk '/^node_scrape_collector_duration_seconds/ {s+=$2} END {printf "%.4f", s+0}' "$f")
+
+    # WALL is the honest cost: one number per scrape, from the client. Falls back to n/a
+    # rather than 0 if the marker is missing, because a 0 here would read as "instant".
+    wall=$(awk -v p="$port" '$1==p {printf "%.4f", $2}' "$OUT/$phase-wall.txt" 2>/dev/null)
+    [ -n "$wall" ] || wall="n/a"
+
+    # sum(cc) is the SUM OF CONCURRENT per-collector durations, kept only because it is
+    # what a naive query computes -- and labelled so nobody reads it as cost again. It
+    # overstates by roughly the collector count; see the header.
+    summed=$(awk '/^node_scrape_collector_duration_seconds/ {s+=$2} END {printf "%.4f", s+0}' "$f")
+
     panics=$(awk '/^node_collector_panics_total/ {s+=$2} END {print s+0}' "$f")
     timeouts=$(awk '/^node_collector_timeouts_total/ {s+=$2} END {print s+0}' "$f")
-    printf '  %-11s %8s %8s %9s %8s %9s\n' "$v" "$series" "$failed" "$latency" "$panics" "$timeouts"
-    echo "$phase $v $series $failed $latency $panics $timeouts" >> "$OUT/measurements.txt"
+    printf '  %-11s %8s %8s %9s %9s %8s %9s\n' "$v" "$series" "$failed" "$wall" "$summed" "$panics" "$timeouts"
+    echo "$phase $v $series $failed $wall $panics $timeouts $summed" >> "$OUT/measurements.txt"
   done
+  log "    wall    = client-observed scrape time (the real cost)"
+  log "    sum(cc) = sum of CONCURRENT per-collector durations; NOT a cost, overstates by ~N"
 }
 
 : > "$OUT/measurements.txt"
@@ -199,7 +257,7 @@ for v in pne nma-dep nma-nodep; do
   p_timeouts=$(awk -v v="$v" '$1=="pressure" && $2==v {print $7}' "$OUT/measurements.txt")
 
   ratio=$(awk -v a="$p_lat" -v b="$b_lat" 'BEGIN{printf "%.2f", (b>0)? a/b : 0}')
-  log "  $v: series $b_series -> $p_series | failed $b_failed -> $p_failed | latency ${b_lat}s -> ${p_lat}s (${ratio}x)"
+  log "  $v: series $b_series -> $p_series | failed $b_failed -> $p_failed | wall ${b_lat}s -> ${p_lat}s (${ratio}x)"
 
   # A collector that FAILS only under pressure is the finding this whole run exists to
   # surface: it distinguishes "absent hardware" from "broke when it got busy".
@@ -222,51 +280,62 @@ for pair in "eks-node-monitoring-agent nma-dep" "nma-nodep nma-nodep"; do
   [ "$r" -gt 0 ] && fail "$2 restarted $r time(s) under pressure"
 done
 
-# The native variant must not be materially slower than the dependency one: it reads the
-# same files through the same procfs library, so a large gap would mean a structural
-# problem rather than a measurement artefact.
+# COST COMPARISON, on wall time.
 #
-# MEASURED RESULT (2026-07-29, 2x t3.large, 70 pods under pressure): the native variant is
-# ~19x FASTER over the 39 SHARED collectors -- 0.0135s versus 0.2578s. That is the opposite
-# direction from the concern, and it is large enough to need an explanation rather than a
-# celebration. See FINDING F-N7-1 in the journal: the dependency branch's relay channel is
-# UNBUFFERED, and its per-collector duration floor is ~3.5ms against pne's ~0.009ms. A
-# standalone benchmark attributes only ~4x to the channel, so the floor is only PARTLY
-# explained -- the remainder is not yet established and is recorded as open rather than
-# guessed at.
+# The threshold is applied to WALL time and to wall time only. The previous version
+# compared summed per-collector durations and asserted a 2.0x bound on them, which is how
+# F-N7-1 ("native is ~19x faster") was produced -- an artefact of summing concurrent
+# measurements, not a difference in cost. See the header.
+#
+# The bound is generous on purpose: a scrape crosses the kubelet network, so run-to-run
+# variance of a few tens of milliseconds is normal and a tight bound would flap.
 dep_lat=$(awk '$1=="pressure" && $2=="nma-dep" {print $5}' "$OUT/measurements.txt")
 nodep_lat=$(awk '$1=="pressure" && $2=="nma-nodep" {print $5}' "$OUT/measurements.txt")
 log ""
-if [ -n "$dep_lat" ] && [ -n "$nodep_lat" ]; then
+if [ "$dep_lat" != "n/a" ] && [ "$nodep_lat" != "n/a" ] && [ -n "$dep_lat" ] && [ -n "$nodep_lat" ]; then
   rel=$(awk -v a="$nodep_lat" -v b="$dep_lat" 'BEGIN{printf "%.2f", (b>0)? a/b : 0}')
-  log "  native/upstream collection-time ratio under pressure: ${rel}x"
-  log "    (native runs 39 collectors, upstream 49, so <1 is expected)"
+  log "  native/upstream WALL-time ratio under pressure: ${rel}x"
+  log "    (native runs 39 collectors, upstream 49, so <=1 is expected)"
   over=$(awk -v r="$rel" 'BEGIN{print (r > 2.0) ? 1 : 0}')
-  [ "$over" -eq 1 ] && fail "the native variant takes ${rel}x as long despite running FEWER collectors"
+  [ "$over" -eq 1 ] && fail "the native variant takes ${rel}x the WALL time despite running FEWER collectors"
+else
+  # An absent wall measurement must not silently skip the only cost check in this script.
+  fail "wall-time measurement missing (dep=$dep_lat nodep=$nodep_lat) -- no cost verdict possible"
+fi
 
-  # The comparison that is actually apples-to-apples: the 39 collectors BOTH run. Comparing
-  # totals credits the native variant for simply running 10 fewer, which is scope rather
-  # than performance.
-  log ""
-  log "  over the 39 SHARED collectors only (apples to apples):"
-  python3 - "$OUT/pressure-nma-dep.prom" "$OUT/pressure-nma-nodep.prom" <<'PYEOF' || true
-import re, sys
+# The per-collector distribution, reported as DIAGNOSIS ONLY and never as a total. Its
+# shape is the useful part: a SPREAD near 1.0 means the durations are all reporting the
+# same concurrent window rather than each collector's own work, which is the signature of
+# the artefact described in the header. That is why spread is printed and sum is not.
+log ""
+log "  per-collector duration distribution (diagnostic, NOT a cost -- see header):"
+python3 - "$OUT/pressure-nma-dep.prom" "$OUT/pressure-nma-nodep.prom" <<'PYEOF' || true
+import re, sys, statistics
 def durs(p):
     out = {}
-    for line in open(p):
-        m = re.match(r'node_scrape_collector_duration_seconds\{collector="([^"]+)"\}\s+(\S+)', line)
-        if m:
-            out[m.group(1)] = float(m.group(2))
+    try:
+        for line in open(p):
+            m = re.match(r'node_scrape_collector_duration_seconds\{collector="([^"]+)"\}\s+(\S+)', line)
+            if m:
+                out[m.group(1)] = float(m.group(2))
+    except OSError:
+        return {}
     return out
 d, n = durs(sys.argv[1]), durs(sys.argv[2])
 shared = sorted(set(d) & set(n))
-sd, sn = sum(d[c] for c in shared), sum(n[c] for c in shared)
-print(f"    {len(shared)} shared: nma-dep={sd:.4f}s  nma-nodep={sn:.4f}s"
-      f"  ratio={sn/sd:.3f}x" if sd else "    no data")
-print(f"    per-collector floor: nma-dep min={min(d.values()):.6f}s  "
-      f"nma-nodep min={min(n.values()):.6f}s")
+if not shared:
+    print("    no shared collectors -- nothing to diagnose")
+    sys.exit(0)
+for label, s in (("nma-dep", d), ("nma-nodep", n)):
+    v = sorted(s[c] for c in shared)
+    spread = (v[-1] / v[0]) if v[0] > 0 else float("inf")
+    print(f"    {label:10s} min={v[0]:.6f}s med={statistics.median(v):.6f}s "
+          f"max={v[-1]:.6f}s spread={spread:.1f}x")
+    if spread < 3.0:
+        print(f"      ^ SPREAD NEAR 1: these {len(v)} collectors do very different amounts of")
+        print( "        work, so near-identical durations mean they are all reporting the")
+        print( "        SAME concurrent window. Do not sum these. See the script header.")
 PYEOF
-fi
 
 log ""
 if [ "$FAILED" -ne 0 ]; then
