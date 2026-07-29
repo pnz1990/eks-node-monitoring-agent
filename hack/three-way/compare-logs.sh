@@ -158,6 +158,34 @@ if [ "$dep_debug" -gt 0 ]; then
   # catch a collector that logs per-device where the other logs per-scrape.
   over=$(awk -v r="$ratio" 'BEGIN{print (r > 3.0) ? 1 : 0}')
   [ "$over" -eq 1 ] && fail "the native variant logs ${ratio}x the DEBUG volume -- worth investigating"
+
+  # AND THE OTHER DIRECTION. This check was one-sided: it could only flag the native
+  # variant being chattier, so nma-dep logging 26x MORE (ratio 0.04) passed silently. A
+  # threshold that can only fire one way is half a check, and the half it was missing is
+  # the one that fired in practice.
+  #
+  # Reported rather than failed, because a large gap here is EXPECTED and benign for two
+  # measured reasons: (a) `kubectl logs --tail` returns a window, not a rate, so a
+  # longer-running pod contributes more lines for the same behaviour, and (b) the upstream
+  # collectors log "collector succeeded" per collector per scrape where the native ones do
+  # not. Measured composition at ratio 0.04: nma-dep 3796 "collector succeeded" + 3099
+  # "Ignoring mount point"; nma-nodep 270 "ignoring mount point" and no per-collector
+  # success line. So it is a verbosity-design difference, not a defect -- but it should be
+  # SEEN rather than passed over in silence.
+  under=$(awk -v r="$ratio" 'BEGIN{print (r < 0.33) ? 1 : 0}')
+  if [ "$under" -eq 1 ]; then
+    inv=$(awk -v r="$ratio" 'BEGIN{printf "%.1f", (r>0)? 1/r : 0}')
+    log "  NOTE: nma-dep logs ${inv}x the DEBUG volume of nma-nodep."
+    log "        Expected, and worth confirming rather than assuming: the upstream"
+    log "        collectors log a per-collector 'collector succeeded' line every scrape."
+    log "        Top messages for each:"
+    for f in nma-dep nma-nodep; do
+      log "          $f:"
+      grep -oE '"level":"DEBUG"[^}]*"msg":"[^"]*"' "$OUT/$f.log" 2>/dev/null \
+        | sed 's/.*"msg":"\([^"]*\)".*/\1/' | sort | uniq -c | sort -rn | head -4 \
+        | sed 's/^/            /' || true
+    done
+  fi
 fi
 
 # ---------------------------------------------------------------------------

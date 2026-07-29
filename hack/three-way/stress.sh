@@ -86,7 +86,32 @@ log() { printf '%s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; FAILED=1; }
 FAILED=0
 
-node=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+# Same node-selection requirement as compare.sh: at >2 nodes, items[0] may be a node where
+# an unrelated release won hostPort 9100 and pne is Pending, which would measure something
+# that is not pne (or nothing) and report it as a difference between implementations.
+select_node() {
+  local n counts sel
+  for n in $(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+    counts=0
+    for sel in "${PNE_NAMESPACE:-monitoring} app.kubernetes.io/name=prometheus-node-exporter" \
+               "$NAMESPACE app.kubernetes.io/name=eks-node-monitoring-agent" \
+               "$NAMESPACE app.kubernetes.io/name=nma-nodep"; do
+      set -- $sel
+      if [ "$(kubectl get pods -n "$1" -l "$2" \
+                --field-selector "spec.nodeName=$n,status.phase=Running" \
+                --no-headers 2>/dev/null | wc -l)" -gt 0 ]; then
+        counts=$((counts + 1))
+      fi
+    done
+    if [ "$counts" -eq 3 ]; then printf '%s\n' "$n"; return 0; fi
+  done
+  return 1
+}
+
+node=$(select_node) || {
+  printf 'FAIL: no node runs all three variants; a same-node comparison is impossible.\n' >&2
+  exit 1
+}
 ip=$(kubectl get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
 
 # ---------------------------------------------------------------------------
@@ -101,8 +126,14 @@ scrape_all() {
   # -w '%{time_total}' captures the WALL time of the scrape, which is the honest cost
   # measure (see the header). Emitted on its own marker line so the parser cannot confuse
   # it with a metric.
+  #
+  # The port is echoed SEPARATELY rather than interpolated into curl's -w format. curl's
+  # format string must be single-quoted to protect %{...} from the shell, which also stops
+  # $p expanding -- the first version emitted a literal "===WALL $p 0.016489===", so every
+  # lookup by port missed and every wall time read as n/a. The guard below caught it, which
+  # is the only reason this is a fixed bug rather than a silently skipped check.
   kubectl run "$pod" --restart=Never --image="$CURL_IMAGE" --command -- \
-    sh -c "for p in 9100 9101 9102; do echo \"===PORT \$p===\"; curl -s -o /tmp/m --max-time 40 -w '===WALL \$p %{time_total}===\n' http://$ip:\$p/metrics; cat /tmp/m; done" \
+    sh -c "for p in 9100 9101 9102; do echo \"===PORT \$p===\"; printf '===WALLPORT %s ' \$p; curl -s -o /tmp/m --max-time 40 -w '%{time_total}\n' http://$ip:\$p/metrics; cat /tmp/m; done" \
     >/dev/null 2>&1
 
   for _ in $(seq 90); do
@@ -119,7 +150,7 @@ scrape_all() {
     /^===PORT 9100===$/ { f=out"/"ph"-pne.prom"; next }
     /^===PORT 9101===$/ { f=out"/"ph"-nma-dep.prom"; next }
     /^===PORT 9102===$/ { f=out"/"ph"-nma-nodep.prom"; next }
-    /^===WALL / { print $2" "$3 > (out"/"ph"-wall.txt"); next }
+    /^===WALLPORT / { print $2" "$3 > (out"/"ph"-wall.txt"); next }
     f { print > f }
   ' "$OUT/$phase-raw.txt"
 
@@ -256,8 +287,17 @@ for v in pne nma-dep nma-nodep; do
   p_panics=$(awk -v v="$v" '$1=="pressure" && $2==v {print $6}' "$OUT/measurements.txt")
   p_timeouts=$(awk -v v="$v" '$1=="pressure" && $2==v {print $7}' "$OUT/measurements.txt")
 
-  ratio=$(awk -v a="$p_lat" -v b="$b_lat" 'BEGIN{printf "%.2f", (b>0)? a/b : 0}')
-  log "  $v: series $b_series -> $p_series | failed $b_failed -> $p_failed | wall ${b_lat}s -> ${p_lat}s (${ratio}x)"
+  # b_lat/p_lat are "n/a" when the wall measurement failed, which is not numeric. awk
+  # then divided by zero and aborted the whole ANALYSIS section mid-run -- so a broken
+  # measurement took out the collector-failure and panic checks below it, which are the
+  # most important things this script reports. Guarded so a missing measurement degrades
+  # one line instead of silently skipping the verdict.
+  if awk -v a="$p_lat" -v b="$b_lat" 'BEGIN{exit !(a+0>0 && b+0>0)}' 2>/dev/null; then
+    ratio=$(awk -v a="$p_lat" -v b="$b_lat" 'BEGIN{printf "%.2fx", a/b}')
+  else
+    ratio="n/a"
+  fi
+  log "  $v: series $b_series -> $p_series | failed $b_failed -> $p_failed | wall ${b_lat}s -> ${p_lat}s (${ratio})"
 
   # A collector that FAILS only under pressure is the finding this whole run exists to
   # surface: it distinguishes "absent hardware" from "broke when it got busy".

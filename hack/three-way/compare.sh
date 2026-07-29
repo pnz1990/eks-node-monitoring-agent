@@ -27,14 +27,22 @@
 #
 # EXPECTED, NOT-A-DEFECT DIFFERENCES, each verified rather than assumed:
 #
-#   1. promhttp_metric_handler_requests_total / _requests_in_flight exist on pne only.
-#      These are promhttp's own HANDLER instrumentation, added by
-#      promhttp.InstrumentMetricHandler, which upstream's node_exporter calls and this
-#      agent does not. They describe the scrape endpoint, not the node -- so their absence
-#      is a difference in agent instrumentation, not in host metrics. Both agents DO have
-#      promhttp_metric_handler_errors_total, which comes from HandlerFor itself.
-#      Excluded, and if the agent should adopt InstrumentMetricHandler that is a separate
-#      decision recorded in the design doc.
+#   1. RESOLVED 2026-07-29 (Q9) -- NO LONGER AN EXPECTED DIFFERENCE, and no longer
+#      excluded. promhttp_metric_handler_requests_total / _requests_in_flight used to
+#      exist on pne only, because the agent called promhttp.HandlerFor without wrapping it
+#      in promhttp.InstrumentMetricHandler. The agent now calls it, so all three variants
+#      export the same promhttp_* set and T1 compares them like any other family.
+#
+#      Adopting it also exposed a real defect: the agent was registering
+#      promhttp_metric_handler_errors_total into BOTH the main and exporter registries, so
+#      every scrape failed to gather with "was collected before with the same name and
+#      label values" -- measured at +1 per scrape, 3182 on a 13h-old pod -- while logging
+#      nothing, because HandlerOpts.ErrorLog was also unset. Both fixed in pkg/metrics.
+#
+#      T1 IS WHY THIS WAS FOUND AT ALL: the missing names were visible in a name diff. The
+#      failing VALUE was not, because this harness deliberately does not compare values.
+#      Worth remembering when reading §"VALUES ARE NOT COMPARED HERE" above -- that
+#      exclusion is still right, but it is a real blind spot and this bug lived in it.
 #
 #   2. node_filesystem_readonly / _device_error: pne 25 series, both agents 4.
 #      This is the EKS mount-point exclusion working as designed. pne reports per-pod
@@ -68,9 +76,43 @@ FAILED=0
 # scrape
 # ---------------------------------------------------------------------------
 
-node=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+# PICK A NODE THAT ACTUALLY RUNS ALL THREE, rather than items[0].
+#
+# This used to take the first node unconditionally, which was fine at 2 nodes where every
+# variant was everywhere. At 6 nodes it is not: an unrelated leftover
+# `grafana-prometheus-node-exporter` release also binds hostPort 9100, so on the nodes it
+# won pne is stuck Pending and :9100 answers for a different exporter -- or not at all.
+# Taking items[0] there would compare pne-vs-agents using something that is not pne, or
+# fail with an empty scrape and look like a code defect.
+select_node() {
+  local n ip counts
+  for n in $(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+    counts=0
+    for sel in "monitoring app.kubernetes.io/name=prometheus-node-exporter" \
+               "$NAMESPACE app.kubernetes.io/name=eks-node-monitoring-agent" \
+               "$NAMESPACE app.kubernetes.io/name=nma-nodep"; do
+      set -- $sel
+      if [ "$(kubectl get pods -n "$1" -l "$2" \
+                --field-selector "spec.nodeName=$n,status.phase=Running" \
+                --no-headers 2>/dev/null | wc -l)" -gt 0 ]; then
+        counts=$((counts + 1))
+      fi
+    done
+    if [ "$counts" -eq 3 ]; then
+      printf '%s\n' "$n"
+      return 0
+    fi
+  done
+  return 1
+}
+
+node=$(select_node) || {
+  log "FAIL: no node is running all three variants, so a same-node comparison is impossible."
+  log "      Check for another release binding hostPort 9100 (kubectl get ds -A | grep node-exporter)."
+  exit 1
+}
 ip=$(kubectl get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
-log "node: $node ($ip)"
+log "node: $node ($ip)  [verified running all three variants]"
 
 # One pod, three curls, so the scrapes are as close together in time as possible.
 # Separate pods would add pod-startup latency between them, and on a counter-heavy
@@ -136,11 +178,14 @@ done
 
 # Metrics that are expected to differ and are excluded from the NAME comparison, each
 # with its reason. Everything else must match exactly.
+# promhttp_metric_handler_requests_total and _requests_in_flight were HERE until Q9 was
+# resolved. They are deliberately no longer excluded: the agent now calls
+# InstrumentMetricHandler, so if they go missing again that is a regression and T1 should
+# say so. An exclusion outliving the difference it was written for is how a fixed gap
+# quietly reopens.
 cat > "$OUT/expected-extra.txt" <<'EXPECTED'
 node_collector_panics_total
 node_collector_timeouts_total
-promhttp_metric_handler_requests_total
-promhttp_metric_handler_requests_in_flight
 EXPECTED
 
 # Families whose SERIES COUNT is expected to differ, with the reason. Kept separate from
