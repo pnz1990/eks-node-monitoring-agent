@@ -30,7 +30,11 @@ metadata:
   name: sustained-ipamd-fault
   namespace: default
 spec:
-  backoffLimit: 0
+  # backoffLimit 1 and a nodeAffinity that AVOIDS the target: K5.2 found the Job's pod running ON
+  # the node under repair, so Karpenter's forceful termination killed the injector along with the
+  # node -- the Job then failed with BackoffLimitExceeded and I briefly credited it with a repair it
+  # had not caused.
+  backoffLimit: 1
   # 45 min: comfortably past Karpenter's 30-minute NetworkingReady toleration, plus node-launch
   # time, so a repair has room to fire and be observed -- but bounded.
   activeDeadlineSeconds: 2700
@@ -39,6 +43,9 @@ spec:
       labels: {nma-fault: sustained-ipamd}
     spec:
       restartPolicy: Never
+      # NOTE: nodeName pins the injector TO the target so it can write that node's log. That is
+      # required for the fault to land, but it means the injector dies with the node. Treat a
+      # Job failure AFTER a repair as expected, not as an injection failure.
       nodeName: NODE_NAME
       tolerations: [{operator: Exists}]
       containers:

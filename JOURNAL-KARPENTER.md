@@ -464,3 +464,94 @@ would be brittle across Go versions and platforms.
 
 **Applies to both forks** — the panic was in shared `main.go`/`pkg/metrics` code. The fix is on the
 dependency branch and must be carried to native.
+
+---
+
+## K5 (part 1) — THE REPAIR LOOP IS CONFIRMED END TO END
+
+**Date:** 2026-07-29 · **Status:** repair execution confirmed on stock `main`
+
+### K5.1 The headline result
+
+**NMA published a Fatal condition → Karpenter tolerated it for its configured window → Karpenter
+forcefully terminated the node and its NodeClaim → a replacement launched.** The full contract, on
+a live cluster, measured rather than inferred.
+
+```
+condition False/IPAMDNotReady since  22:36:22Z
+node + nodeclaim deleted             23:08:24Z
+unhealthy duration                   32.0 minutes
+Karpenter toleration (NetworkingReady=False)  30 minutes
+```
+
+**32.0 minutes against a 30-minute toleration.** Karpenter acted 2 minutes after the node became
+eligible, which is exactly the documented behaviour.
+
+Karpenter's own log:
+
+```
+"deleted node"     Node=ip-192-168-14-177   NodeClaim=nma-main-8sxrx
+"deleted nodeclaim" NodeClaim=nma-main-8sxrx provider-id=aws:///us-west-2d/i-068cdab627ecdccc8
+```
+
+And the forceful signature K0.2 predicted, from the pod events:
+
+```
+Disrupted: Deleting the pod to accommodate the terminationTime ... The pod was granted 1 seconds
+of grace-period of its 30 terminationGracePeriodSeconds. This bypasses the PDB of the pod and the
+do-not-disrupt annotation.
+```
+
+**Repair bypasses drain**, confirmed. The pool self-healed back to 5 nodes.
+
+This is the first result in this whole effort that tests repair **execution** rather than condition
+**publication**, and it required everything K0–K4 established: the feature gate, the ≥5-node pool
+sizing, and the sustained-fault insight from F-K1-1.
+
+### K5.2 A CORRECTION TO MY OWN ATTRIBUTION
+
+I initially credited the repair to the sustained-fault Job. **That is wrong, and the Job's own
+status shows it:**
+
+```
+sustained-ipamd-fault: FailureTarget=True BackoffLimitExceeded ... failed=1
+```
+
+The Job's pod was running **on the node being repaired**, so Karpenter's forceful termination killed
+it, and with `backoffLimit: 0` the Job failed rather than rescheduling.
+
+**What actually held the condition false** was the **earlier one-shot injection** from A3 (~22:36).
+So on this node the condition did *not* self-clear the way F-K1-1 observed — it persisted for 32
+minutes unaided.
+
+**Two consequences, both recorded rather than smoothed over:**
+
+1. **The repair result stands.** It rests on the measured 32-minute unhealthy duration and
+   Karpenter's own deletion log, neither of which depends on which injector held the condition.
+2. **F-K1-1's self-clearing is INTERMITTENT, not deterministic.** In K1 the condition cleared in
+   ~15 min; here it held 32. The `ipamd.log` reader evidently re-reports while the line remains the
+   newest in the file, and whether it clears depends on subsequent log activity. **So a repair test
+   must still use a sustained fault** — but the sustained Job needs
+   `backoffLimit > 0` *and* to run somewhere other than the target node, or it dies with the very
+   node it is testing. Fixed in the manifest.
+
+### K5.3 A second termination that needs explaining: `nodep` node 66-73
+
+`ip-192-168-66-73` (nodep pool) was **also** deleted at 23:07:49Z, and **I never injected a fault
+there**. Candidate causes, in order of likelihood:
+
+- **`h1-collide` / `fk4-verify` fallout.** Both test DaemonSets ran on the nodep pool with
+  deliberately broken configuration, and `h1-collide` was in CrashLoopBackOff on that node. A
+  crash-looping agent stops publishing conditions, and a **stale** condition can age into
+  `Unknown`, which Karpenter treats as unhealthy after 30 min.
+- **Consolidation.** `consolidateAfter: 1m` is deliberately aggressive, and the pool churned while
+  I added and removed test DaemonSets.
+
+**I cannot currently distinguish these**, because the events that would say so have aged out.
+Recorded as **unattributed** rather than guessed, and it is a gap in the harness: `watch-repair.sh`
+observes one node, so a termination elsewhere has no recorded reason.
+
+**Action:** K5 part 2 needs a cluster-wide termination watcher that captures the disruption *reason*
+for every node as it happens, so "a node went away" is never again a fact without a cause.
+Critically, this also means **A5 (no spurious Fatal) is not yet established** — a node was replaced
+without a known reason, and until that is attributable I cannot claim no spurious repair occurred.
