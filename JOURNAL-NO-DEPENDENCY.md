@@ -403,3 +403,54 @@ because the pattern becomes operator-configurable the moment it is wired to the 
 upstream defects (#1672, #1915/#1841), so those are where "fix rather than contain" gets tested properly.
 
 ---
+## [2026-07-29T04:45Z] N3 — filesystem ported (6 of 39), carrying both fixes
+
+**Phase:** N3
+**Status:** confirmed
+
+**What I did:** Ported `filesystem` — 549 lines upstream, the most substantial collector so far, and the
+one carrying both of this branch's concrete improvements.
+
+**FIX 1 — upstream's data race, now structurally impossible.** Upstream's `GetStats` appends to the
+result slice from two goroutines: the producer appends a `deviceError` entry per already-stuck mount
+while the consumer loop appends everything drained from `statChan`. Here the stuck entry is *sent
+through the same channel*, so there is exactly one writer. Regression test
+`TestStuckMountEntryTravelsThroughTheChannel` runs under `-race`; if the entry were appended directly it
+would report a race.
+
+**FIX 2 — the pod-mount cardinality exclusion**, carried over from the dependency branch. The mount
+table read is PID 1's, and under `hostPID` that is host init's namespace containing every per-pod mount.
+`TestFilesystemNoPerPodMountsOnThisHost` asserts against the *real* host table that no reported mount
+point is a per-pod path.
+
+**The must-keep half of the exclusion test is the important one.** An over-broad regexp swallowing
+`/var` or `/var/lib/kubelet` would hide a real disk-full condition — a worse failure than the
+cardinality it fixes. `TestEKSExclusionKeepsRealFilesystems` pins 11 real mount points as must-keep.
+Also `TestEKSExclusionExtendsUpstreamRatherThanReplacing`: supplying the flag *replaces* upstream's
+default, so every alternative upstream excludes must be repeated or we would silently start reporting
+filesystems upstream never did.
+
+**Two of my own errors, caught by the compiler and by reading:**
+1. `fs.Proc(1)` returns `(Proc, error)`; I used it in single-value context. Compiler caught it.
+2. My fallback condition was `if !errors.Is(err, errors.Unwrap(err)) || err != nil` — incoherent
+   nonsense that would have evaluated as `err != nil` by accident. Rewrote it plainly. Worth recording
+   because it compiled fine after the first fix and only reading it revealed it was gibberish.
+
+Also replaced a hand-rolled insertion sort with `sort.Strings` — no reason to reimplement it.
+
+**Stuck-mount machinery ported faithfully**, including `clearStuck`: a mount that starts responding
+again is forgotten, so a transient hang does not permanently suppress a filesystem. Upstream does this
+and it is easy to miss.
+
+**Four more unreachable branches made testable rather than excluded:** both invalid-regexp checks (kept
+because the patterns become operator-configurable once wired to the chart), the hidepid fallback, and
+its double-failure. All via injected seams; `.covignore` remains untouched.
+
+**Gates:** coverage 100.0% · race clean · staticcheck clean.
+
+**Progress: 6 of 39** — `loadavg`, `meminfo`, `cpu`, `vmstat`, `stat`, `filesystem`.
+
+**Next:** `diskstats`, `netdev`, `netclass`. `netclass` carries #1915/#1841 — the third place where
+fixing beats containing.
+
+---
