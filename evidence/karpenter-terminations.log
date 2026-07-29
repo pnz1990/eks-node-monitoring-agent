@@ -1,0 +1,5 @@
+23:12:40 watching 21 node(s); poll=15s
+23:43:12 LAUNCHED   ip-192-168-93-203.us-west-2.compute.internal pool=dep
+23:43:46 TERMINATED ip-192-168-33-22.us-west-2.compute.internal pool=dep last-conditions=[NetworkingReady=False/IPAMDNotReady]
+23:43:46   reason=UNATTRIBUTED  <-- investigate: this blocks claim A5
+23:43:46   NOTE: node had non-True NMA conditions [NetworkingReady=False/IPAMDNotReady] -> consistent with NMA-driven repair
