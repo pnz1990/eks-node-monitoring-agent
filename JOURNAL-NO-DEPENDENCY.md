@@ -454,3 +454,52 @@ its double-failure. All via injected seams; `.covignore` remains untouched.
 fixing beats containing.
 
 ---
+## [2026-07-29T05:05Z] N3 — netdev ported (7 of 39). The legacy() transformation is a SUM, not a rename.
+
+**Phase:** N3
+**Status:** confirmed
+
+**The subtle part, and the most dangerous so far.** Upstream's `legacy()` does not merely rename kernel
+fields to stable metric names — for four of its rules it **sums several kernel counters into one
+metric**:
+
+```
+node_network_receive_frame_total    = receive_frame_errors + receive_length_errors
+                                      + receive_over_errors + receive_crc_errors
+node_network_transmit_carrier_total = transmit_carrier_errors + transmit_aborted_errors
+                                      + transmit_heartbeat_errors + transmit_window_errors
+node_network_receive_drop_total     = receive_dropped + receive_missed_errors
+```
+
+**Omitting a contributor produces a metric with the right name, right type, right labels, and the wrong
+value.** No name comparison, no label comparison, and no series-shape diff would catch it — including
+the three-way harness, which compares the contract rather than values. Only reading upstream's source
+reveals it.
+
+Ported as a rule table and verified mechanically: extracted upstream's `legacy()` body with a regexp,
+parsed out (from, to, contributors) for each rule, and compared as sets.
+```
+upstream rules: 11    our rules: 10    IDENTICAL (as sets): True
+```
+The count differs because **upstream lists the `multicast` rule twice** — the second is a no-op, since
+the first `pop()` already removed the key. Harmless redundancy in their code, not a missing rule in
+ours. Recorded so the discrepancy in counts is not mistaken for a gap later.
+
+**A subtlety I reproduced deliberately rather than "improving":** if a *contributor* is present but its
+*source* field is not, upstream's rule never fires and the contributor surfaces as its own metric. That
+looks like a bug, but changing it would diverge from upstream's output, so it is preserved and asserted
+in `TestLegacyContributorWithoutSourceIsStillRemoved`.
+
+**One more of my own test bugs, same family as the previous two.** I asserted the pre-legacy name
+`multicast_total` never appears — but that is a substring of the *correct* name
+`node_network_receive_multicast_total`, so the test failed against working code. Fixed by matching full
+metric names with the `node_network_` prefix. **Third time now that a test failed because I asserted
+against a loosely-specified artifact.** The pattern is clear enough to watch for deliberately.
+
+**Gates:** coverage 100.0% · race clean · staticcheck clean.
+
+**Progress: 7 of 39** — `loadavg`, `meminfo`, `cpu`, `vmstat`, `stat`, `filesystem`, `netdev`.
+
+**Next:** `diskstats`, then `netclass` (#1915/#1841 — the all-or-nothing device read).
+
+---
