@@ -1986,3 +1986,84 @@ invoice.
 **Remaining: N8, the design doc with a recommendation.**
 
 ---
+## N8 COMPLETE — design doc and recommendation
+
+`docs/design/no-dependency-approach.md`. The recommendation, stated plainly:
+
+> **Ship the dependency branch first. Keep the native branch as the successor, and merge it
+> once upstream #1915 has been raised there.**
+
+That is not the answer I expected to reach after porting 39 collectors, so the reasoning
+matters more than the verdict:
+
+1. **840 lines vs 8,523.** Reviewing 840 lines of integration is a different proposition from
+   reviewing 8,523 lines of ported collectors, and the contribution guidance favours the
+   smaller change.
+
+2. **The native branch's decisive advantage is ONE fix, and that fix belongs upstream.**
+   #1915 affects every node_exporter user on Kubernetes. The right first move is a PR to
+   `prometheus/node_exporter` — the port here is the reference implementation and the
+   regression test. If upstream takes it, the dependency branch inherits the fix and the
+   strongest argument for owning 8,523 lines evaporates.
+
+3. **The ~15x performance gap is not yet an argument.** It is a finding about the dependency
+   branch's relay buffer plus an unidentified remainder, and likely fixable there.
+   Recommending on a number I cannot fully explain would be recommending on luck.
+
+4. **Ownership cost is recurring.** Every upstream release becomes a per-collector diff.
+   Worth paying to fix a bug upstream will not take; not worth paying pre-emptively.
+
+**What would flip it:** upstream declining or sitting on #1915. That single fix is the
+difference between "a dependency with a known, contained bug" and "a dependency with a known
+bug that hits us on every pod schedule."
+
+### The honest cost of the native approach, stated in the doc
+
+Not "porting is hard" but something more specific: **porting produces defects that look
+correct from inside the port.** The `netdev` netlink miss is the clearest case — 7 series
+lost on the live node, and all 565 unit tests passed, because they compare the port against
+its own table rather than against the endpoint upstream serves. Only the end-to-end diff
+caught it.
+
+That is the argument I could not have made before building both and measuring them.
+
+### Confidence and limits, also in the doc
+
+**Established:** identical metric names, identical per-collector success, identical series
+counts, on live EKS nodes, at baseline and under pressure, with a harness that self-tests its
+own ability to detect each class of difference.
+
+**Not established:** absolute metric VALUES have not been compared across implementations.
+That needs a Prometheus `rate()` window (the V3/V4 tier), not two curls seconds apart.
+Structural and success-value agreement is strong evidence, not proof that every number
+matches.
+
+**Scale:** 2 nodes / 70 pods. The dependency branch was previously measured at ~2,888 pods
+across 6 nodes; the native branch has not been, and that is a cost decision (Q3).
+
+Two new open questions recorded: **Q8** the latency floor, **Q9** whether to adopt
+`promhttp.InstrumentMetricHandler` (the only remaining metric-name difference from pne, and a
+fleet-wide cardinality decision rather than a code one).
+
+---
+
+# ALL PHASES COMPLETE — N0 through N8
+
+```
+N0  scope and interpretation        39 of 49 collectors, decided and approved
+N1  package scaffolding             Paths, Collector, Set, registry
+N2  test infrastructure             fixtures, upstream-diff harness
+N3  port all 39 collectors          COMPLETE
+N4  dependency removal verified     gate PASS with a passing self-test
+N5  three-way deployment            pne :9100, nma-dep :9101, nma-nodep :9102
+N6  three-way validation            0 differences, metrics AND logs
+N7  stress and load                 all three held; F-N7-1 found
+N8  design doc and recommendation   COMPLETE
+```
+
+**Final state:** coverage 100.0% · race clean · vet clean · staticcheck clean ·
+no-dependency gate PASS · 565 tests · `.covignore` untouched · 5 upstream defects found
+(2 reachable in the field) · 4 documented parity exceptions · 0 metric-name differences
+against the reference endpoint on a live cluster.
+
+---

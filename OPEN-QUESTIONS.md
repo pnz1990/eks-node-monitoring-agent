@@ -116,3 +116,50 @@ endpoint work, and cheap to contribute individually. But filing is a public post
 **Recommendation:** batch them and file after the port is further along, so the list is complete rather
 than trickled. Confirming ND4 (the prediction that porting reveals ≥1 upstream bug) — already true at
 5 of 39 collectors.
+
+## Q8 — the dependency branch's per-collector latency floor  *(OPEN, found in N7)*
+
+Measured over the 39 collectors BOTH variants run, on the same nodes in the same scrape pass:
+
+```
+              baseline    under pressure
+nma-dep        0.9114s        0.3288s
+nma-nodep      0.0181s        0.0210s
+pne            0.0123s        0.0215s
+```
+
+The dependency branch is ~15x slower than the native one and ~70x pne for the same data. The
+distribution shows a FLOOR rather than slow work — its median is ~250x the native variant's,
+and collectors doing wildly different amounts of work land within a whisker of each other.
+
+**Partial cause:** its relay channel is unbuffered (`make(chan prometheus.Metric)`) where the
+native one is buffered at 1024, so every metric costs a goroutine handoff. Benchmarked in
+isolation, that accounts for **~4x, not ~250x**.
+
+**Ruled out:** CPU limits (both agents 250m/200Mi), CPU contention (the gap is larger at
+baseline with no saturation running).
+
+**Unexplained:** the remaining factor.
+
+**Why not fixed here:** changing that branch's relay buffer would invalidate the 298/298
+parity evidence it carries and the controlled comparison this branch exists for.
+
+**What is needed:** fix the buffer on the dependency branch, re-measure, and identify the
+remainder. It affects whichever branch ships, and it should be resolved before either is
+recommended on performance grounds. At 0.9s against a 15s scrape interval it breaks nothing
+today.
+
+## Q9 — should the agent adopt `promhttp.InstrumentMetricHandler`?  *(OPEN, found in N6)*
+
+pne exports `promhttp_metric_handler_requests_total` and `_requests_in_flight`; the agent
+exports neither, because it calls `promhttp.HandlerFor` without wrapping it in
+`InstrumentMetricHandler`. Both do export `promhttp_metric_handler_errors_total`, which
+`HandlerFor` provides directly.
+
+These describe the scrape endpoint rather than the node, so it is not a host-metrics parity
+gap — but it IS the only remaining metric-name difference between the agent and pne, and a
+dashboard that graphs scrape request rates would find it missing.
+
+Cheap to add (one wrapper call) and affects both branches identically. Not done unilaterally
+because it adds 2 series per node to every scrape, and that is a fleet-wide cardinality
+decision rather than a code decision.
