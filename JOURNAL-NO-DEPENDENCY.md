@@ -1425,3 +1425,67 @@ collector that legitimately reports `success=0` on EKS, so parity there means it
 succeed emptily.
 
 ---
+## N3 — `xfs`: 39 counters, and a table I refused to transcribe by hand
+
+The largest flat table in the set: 39 counters per XFS filesystem. On the live EKS node this is **real,
+load-bearing data** — 40 series, because the root volume is XFS on Amazon Linux 2023 — not another
+absent-hardware collector.
+
+### Why the table was GENERATED rather than transcribed
+
+Every entry pairs a metric name with a struct field, across **11 nested structs with deliberately
+repetitive names**: `AllocationBTree.Lookups` and `BlockMapBTree.Lookups`, `DirectoryOperation.Lookup`,
+`InodeOperation.Found`. Transcribing 39 of those by hand is precisely the shape of task where one entry
+ends up pointing at its neighbour — and the result is a metric with the **correct name, type and labels
+reporting a plausible number from the wrong counter**. Invisible to any structural comparison, invisible
+to the three-way harness, invisible to review.
+
+So the table was extracted from upstream's source programmatically, and the test **re-extracts it and
+compares all 39 pairs** rather than spot-checking values.
+
+### Recovering "which field does this accessor read?" by reflection
+
+Comparing names and help text is easy; comparing *which struct field each closure reads* is not, because
+a `func(*xfs.Stats) float64` is opaque. Solved by probing: walk every numeric leaf of `xfs.Stats`, set
+exactly one to a sentinel, and see which accessor returns it. That recovers the dotted field path from our
+own table, which can then be compared against the path parsed out of upstream's source.
+
+That makes a mis-wired accessor fail **even though the metric name is right** — which is the entire point.
+
+**Negative controls, all three biting:**
+
+```
+point block_map_btree_lookups at s.AllocationBTree.Lookups   -> 3 tests fail, by name:
+   "block_map_btree_lookups_total reads the WRONG FIELD:
+    upstream uses s.BlockMapBTree.Lookups, we use s.AllocationBTree.Lookups"
+   "block_map_btree_lookups_total and allocation_btree_lookups_total both read
+    s.AllocationBTree.Lookups"
+reword one help string                                       -> 1 test fails
+drop one of the 39 entries                                   -> 3 tests fail
+```
+
+The duplicate-accessor test is the one I'd have missed by hand: **two entries reading the same field** is
+the copy-paste failure this collector is most exposed to, and both metrics would exist with plausible
+values while nothing complained. Asserted as `39 metrics must read 39 distinct fields`.
+
+### Contract details
+
+- **No `ErrNoData` when there are no XFS filesystems.** `SysStats` returns an empty slice and upstream
+  returns `nil`, so a node without XFS reports success with zero series — same contract as the rest of
+  the hardware group.
+- **Every metric is a counter.** All 39 are monotonic since mount, so `rate()` is the useful query; as
+  gauges they would be nearly useless. Asserted for all 39 rather than a sample.
+- **Descriptors built once at construction.** The metric set is fixed at compile time, unlike `netdev`
+  where the kernel supplies field names, so rebuilding 39 `Desc`s every 15 seconds would be pure waste.
+  Asserted on pointer identity across a scrape.
+
+**Gates:** coverage 100.0% · race clean · vet clean · staticcheck clean · no-dependency gate PASS ·
+426 tests (was 413) · `.covignore` untouched.
+
+**Progress: 31 of 39.**
+
+**Next:** `btrfs`, `mdadm`, `powersupplyclass`, `watchdog`, `infiniband`, `dmmultipath`, `textfile`,
+`hwmon`. `hwmon` is the one collector that legitimately reports `success=0` on EKS, so parity there means
+it must FAIL rather than succeed emptily — the inverse of everything else in this group.
+
+---
