@@ -66,3 +66,63 @@ worthless, and this is the same negative-control discipline that caught the dash
 the previous branch.
 
 ---
+## [2026-07-29T03:00Z] N1 complete — three-way harness, with both controls proven
+
+**Phase:** N1
+**Status:** confirmed
+
+**What I did:** Wrote `hack/parity-test-3way.sh`, reusing the contract-extraction awk and both guards
+(stale-port refusal, `node_exporter_build_info` verification) from the two-way harness. Then proved it
+works in both directions *before* writing any collector code.
+
+**Positive control** — the known-parity pair:
+```
+>> pne        298 metric names, 298 series shapes
+>> nma-dep    298 metric names, 298 series shapes
+>> PARITY  pne == nma-dep
+EXIT=0
+```
+
+**Negative control** — a deliberately deficient stub standing in for `nma-nodep`, serving only
+`node_load1`:
+```
+>> nma-nodep  1 metric names, 1 series shapes
+>> DIVERGED  pne != nma-nodep  (594 only in pne, 0 only in nma-nodep)
+>> DIVERGED  nma-dep != nma-nodep  (594 only in nma-dep, 0 only in nma-nodep)
+EXIT=1
+```
+
+The harness detects 594 missing contract entries and exits non-zero. It can fail the new
+implementation, which is the whole point of building it first.
+
+**A bug in my own harness, found by the positive control failing when it should have passed.**
+
+The `verify_is_node_exporter` guard reported "does not look like node_exporter" against a perfectly
+healthy exporter. Three debugging steps, the first two of which were wrong:
+
+1. Guessed the locally-built binary emits no `build_info` because its version string is empty.
+   *Refuted:* `node_exporter_build_info{...,version=""} 1` is present, 3 occurrences.
+2. Guessed a startup race — endpoint answers 200 before the registry populates. Added a 10s retry.
+   *Refuted:* still failed after 20 attempts.
+3. Ran with `bash -x` and read the exporter's own log. The tell was there:
+   `msg="error encoding and sending metric family: ... write: broken pipe"`.
+
+**Root cause:** `curl -s ... | grep -q pattern`. `grep -q` exits on the *first match*, closing the pipe;
+curl then dies of SIGPIPE, and `set -o pipefail` propagates that as pipeline failure. So the guard
+failed **precisely when the pattern matched** — inverted logic, invisible without reading the
+subprocess log.
+
+My standalone reproduction attempt missed it because I tested the *no-match* case, where curl reads the
+whole body and exits 0. The bug only manifests on a match.
+
+Fixed by buffering the body into a variable and using a bash pattern test instead of a pipe.
+
+**Note:** the two-way `hack/parity-test.sh` has the *same* `curl | grep -q` construct at line 88 and has
+never failed, because it runs the check before `set -o pipefail`... it does not — it has pipefail set
+too. It has simply not hit the race in practice. **Worth fixing there as well rather than leaving a
+latent inverted guard in the older harness.**
+
+**Next:** N2 — the `pkg/hostmetrics/` framework with no collectors: registry, dispatch, `--path.*`,
+`ErrNoData`, meta metrics, native pflag config. Reuse `resilience.go` and `server.go` unchanged.
+
+---
