@@ -318,3 +318,108 @@ registered and initialised nodes with all three variants installed.
 - **Behaviour under churn.** These are at-rest measurements. Consolidation churn is K5, and that is
   where hazard H2 (veth churn vs Fatal `InterfaceNotUp`) actually lives.
 - **The Fatal reason set is not enumerated** — only shown to be empty at rest on all three.
+
+---
+
+## K4 — H1 is real, but its shape is NOT what the goal file predicted
+
+**Date:** 2026-07-29 · **Status:** complete
+
+### K4.1 B4 — metric parity holds on Karpenter nodes
+
+Scraped both forks on Karpenter-launched nodes, same pass:
+
+```
+dep   (:9101)  304 node_* names
+nodep (:9102)  304 node_* names
+name diff      EMPTY both ways
+```
+
+Identical to the MNG result, so **nothing about Karpenter-launched nodes changes the metric
+contract.** `promhttp_metric_handler_errors_total{cause="gathering"} = 0` on both, confirming the
+Q9 fix holds here too.
+
+### K4.2 B3 — collector failures and condition reporting are independent
+
+```
+dep    10 failing collectors   all conditions True
+nodep   1 failing collector    all conditions True
+```
+
+A 10-vs-1 difference in collector failures with **zero** difference in condition health. That is
+B3's claim demonstrated rather than assumed: the metrics path cannot degrade the Karpenter signal.
+
+### K4.3 B1 — both agents schedule on every Karpenter node
+
+`desired=5 ready=5` for both forks. They use `:9101`/`:9102`, so they do not contend for `:9100`.
+
+**21 pods are port-blocked cluster-wide** (`didn't have free ports`), every one a *node-exporter*
+competing for 9100 — never an NMA agent. So B1 passes, and the collision is real but currently
+lands on the exporters rather than on the agent.
+
+### K4.4 FINDING F-K4-1 — a port conflict PANICS the whole agent
+
+The first H1 attempt deployed an extra agent with `hostPort: 9100` into the `nodep` pool. Result:
+**5/5 CrashLoopBackOff**, and the reason is the important part:
+
+```
+panic: failed to listen on :9102: listen tcp :9102: bind: address already in use
+main.main() /workspace/cmd/eks-node-monitoring-agent/main.go:99
+```
+
+Two things here:
+
+1. **The port came from the ConfigMap, not the container port.** I set `containerPort/hostPort:
+   9100` but the agent read `address: ":9102"` from the mounted config and collided with the
+   *existing* `nma-nodep` agent. My test was wrong — but it produced a real finding anyway.
+
+2. **A bind failure is a `panic` that kills the entire process.** `mgr.Add(metricsServer)` puts the
+   metrics listener under the controller-runtime manager, and `utilruntime.Must(run())` at
+   `main.go:99` turns any returned error into a panic. So **a metrics-port conflict takes down
+   NodeCondition reporting and the Karpenter repair signal with it.**
+
+   This is the *inverse* of the resilience boundary's whole purpose. That boundary was built so a
+   collector defect could never take down condition reporting — and it works. But a **startup**
+   bind failure on the metrics listener bypasses it entirely and kills the agent.
+
+   **Severity: this is the strongest candidate BLOCKER found so far, and it belongs to BOTH forks**
+   (the panic is in `main.go`/`pkg/metrics`, shared). On a customer node where anything already
+   holds the configured port, enabling the metrics endpoint would turn a *monitoring* agent into a
+   crash loop — and Karpenter would see a node with no health signal at all.
+
+   Mitigating: `metrics.enabled` defaults to **false**, so this cannot fire on a default install.
+
+### K4.5 The `:9100`-vs-PNE case does NOT collide — and the reason matters
+
+Deployed an agent with `address: ":9100"` onto nodes where a node-exporter *was* running.
+Result: **5/5 Running, 0 restarts.** Both bound successfully.
+
+Cause, read from PNE's own DaemonSet rather than guessed:
+
+```
+pne args: --web.listen-address=[$(HOST_IP)]:9100     <- a SPECIFIC address
+agent   : "serving ... metrics" address="[::]:9100"  <- ALL addresses
+```
+
+Linux permits both binds when the specific-IP socket is created first. **But traffic goes to the
+specific bind:** probing `:9100` on that node returned a metric set with
+`node_collector_panics_total` count **0** — an agent-only family — so **PNE is answering and the
+agent's endpoint is silently unreachable.**
+
+**This is a worse failure than a crash**, because nothing reports it: the agent logs "serving
+node_exporter compatible metrics", the DaemonSet is Ready, and the scrape returns 200 with
+plausible data — from the wrong process. A migration that left PNE installed would appear to work
+while never actually serving the agent's metrics.
+
+### K4.6 Consequence for the goal file
+
+The goal predicted H1 as "the agent cannot schedule, so the node has no monitoring". Measured, it
+is two *different* failures:
+
+| Predicted | Measured |
+|---|---|
+| agent Pending on `FreePort` | **did not occur** — 21 port-blocked pods are all node-exporters |
+| — | **F-K4-1:** bind conflict → `panic` → whole agent crash-loops (both forks) |
+| — | **F-K4-5:** `[::]` vs `[HOST_IP]` → both bind, PNE wins traffic, agent silently unreachable |
+
+Neither was anticipated. Both are recorded rather than reshaped to fit the prediction.
