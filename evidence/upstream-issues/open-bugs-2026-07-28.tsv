@@ -1,0 +1,12 @@
+#1007	2018-07-18	bug	Panic and crash when supervisord collector enabled, yet supervisord not listening on 127.0.0.1:9001	https://github.com/prometheus/node_exporter/issues/1007
+#1498	2019-09-24	bug	node_filesystem_{size,avail}_bytes report wrong values for ZFS filesystems	https://github.com/prometheus/node_exporter/issues/1498
+#1672	2020-04-10	bug,require/feedback	node_filesystem_{free,avail}_bytes reporting values larger than node_filesystem_size_bytes	https://github.com/prometheus/node_exporter/issues/1672
+#1710	2020-05-22	bug	ERROR: cpufreq collector failed after 1.499322s: strconv.ParseUint: parsing \"<unknown>\": invalid syntax" source="collector.go:132"	https://github.com/prometheus/node_exporter/issues/1710
+#1841	2020-09-08	bug,accepted,platform/Linux	Collector netclass/bonding leads to scrape timeouts	https://github.com/prometheus/node_exporter/issues/1841
+#1844	2020-09-11	bug,platform/Linux	wifi collector not exposing all metrics on arm64 platform	https://github.com/prometheus/node_exporter/issues/1844
+#1915	2020-12-17	bug,accepted	netclass collector fails while trying to get metrics from ignored devices	https://github.com/prometheus/node_exporter/issues/1915
+#2217	2021-11-25	bug,accepted	EXC_BAD_ACCESS (Code Signature Invalid) on M1 	https://github.com/prometheus/node_exporter/issues/2217
+#2514	2022-10-21	bug,accepted	node_filesystem collector unable deduplicate data from multihomed mounts like nfs	https://github.com/prometheus/node_exporter/issues/2514
+#2799	2023-09-11	bug,accepted	Node exporter complains about unknown metric lines from NFSd on Linux 6.6-rc1	https://github.com/prometheus/node_exporter/issues/2799
+#2906	2024-01-24	bug,accepted	err="no CPU power status has been recorded" on M3	https://github.com/prometheus/node_exporter/issues/2906
+#3500	2025-12-07	bug,accepted,platform/Linux	Linux mdadm collector fails if any software RAID array has a delayed check or resync	https://github.com/prometheus/node_exporter/issues/3500

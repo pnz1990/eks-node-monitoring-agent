@@ -1,0 +1,209 @@
+#199	2016-01-21	accepted,help wanted,test-infra	Test non-Linux procfs collector support (e.g. Solaris)
+#295	2016-08-31	accepted,help wanted	Network namespace awareness
+#383	2016-12-22		Define some light-weight maintainer processes
+#402	2017-01-04		Cross compiled netbsd binaries segfault in netbsd 7.0 VM
+#478	2017-02-28	enhancement,accepted,help wanted	Improve end-to-end tests
+#535	2017-03-24	enhancement,accepted,help wanted	Add neighbor stats
+#600	2017-06-12	enhancement,accepted,help wanted	Way to distinguish bind mounted path ? 
+#754	2017-12-06	enhancement	Add System V semaphores and shared memory metrics
+#866	2018-03-26	enhancement	Wishlist: metric for inotify watches
+#987	2018-06-27	enhancement	RFE: Add support for CIFS
+#993	2018-07-06		Mounstats collector ignores NFS mount even if metrics are different
+#1007	2018-07-18	bug	Panic and crash when supervisord collector enabled, yet supervisord not listening on 127.0.0.1:9001
+#1012	2018-07-20		Plugin.open throws runtime error while doing make build, but works when i do static build "go build"
+#1017	2018-07-23		SmartOS build fail LDFLAGS: -fno-stack-protector -lssp
+#1054	2018-08-28		 nfs server stop,but nfs client is mountiong,node_export is down
+#1065	2018-09-11		Empty reply from server in roughly every other call to the node exporter metrics endpoint
+#1085	2018-09-25	accepted	Proposal: collect mdraid metrics from sysfs instead of parsing /proc/mdstat
+#1141	2018-11-02	enhancement,help wanted	Feature Request to resolve Virtual-IPs to Hostnames in ipvs collector
+#1163	2018-11-19		node-exporter retrying every second
+#1170	2018-11-26		Where can I see a detailed explanation of all the metrics ?
+#1260	2019-02-11	platform/FreeBSD	Release FreeBSD binaries
+#1266	2019-02-19		sas3ircu textfile exporter
+#1276	2019-03-05		Distinguish between enabling collectors additively vs. by enumeration
+#1295	2019-03-21		smartmon.py ignore raw value
+#1327	2019-04-21	enhancement,accepted,help wanted	Feature request: ARM6 Docker image
+#1350	2019-05-20		implement handling of systemd active (exited) status 
+#1353	2019-05-24		Stuck NFS mount unexpected behavior (+ Proposal)
+#1379	2019-06-14		Add filter flag to mountstats
+#1397	2019-06-25	help wanted,platform/Linux	Provide useful alert rule samples
+#1405	2019-06-28		Move buildkite steps to pipeline.yml
+#1424	2019-07-12		Recent container images published to quay.io lack signatures
+#1440	2019-07-31	enhancement,accepted,collector/systemd	[node_exporter][metric] node_systemd_unit_state with labels: "high-level unit activation state" and "low-level unit activation state" 
+#1462	2019-08-29		error gathering metrics: collected metric \"apt_upgrades_pending\" ... was collected before with the same name and label values
+#1477	2019-09-09		can't compile on Solaris/SmartOS
+#1498	2019-09-24	bug	node_filesystem_{size,avail}_bytes report wrong values for ZFS filesystems
+#1517	2019-10-11	enhancement,platform/Linux	optimize cpufreq collector for multithreaded physical cores
+#1520	2019-10-17	enhancement	adding mountpoint label in metric if possible
+#1521	2019-10-19		Add Netstat IpInHdrErrors and IpInAddrErrors to default fields
+#1562	2019-12-02		Proposed minor changes to defaults for collector.diskstats.ignored-devices, collector.filesystem.ignored-fs-types
+#1583	2020-01-08		mountstats:  not enough information for NFS stats
+#1601	2020-02-11		[FR] New module for `sysfs-block`
+#1604	2020-02-15	enhancement,accepted	Proposal: Extend network bonding metrics
+#1667	2020-04-06	require/feedback	node_filesystem_* Metrics deliver the Value 0
+#1672	2020-04-10	bug,require/feedback	node_filesystem_{free,avail}_bytes reporting values larger than node_filesystem_size_bytes
+#1710	2020-05-22	bug	ERROR: cpufreq collector failed after 1.499322s: strconv.ParseUint: parsing \"<unknown>\": invalid syntax" source="collector.go:132"
+#1724	2020-05-28		Allow diskstat plugin to accept disk names and ignore rest.
+#1742	2020-06-12		Remove v1.x DEPRECATED features
+#1755	2020-06-17		devstat_freebsd.c code scan failed
+#1767	2020-06-27		Typo in the row Network Traffic, panel NF Con n track
+#1781	2020-07-09	enhancement,platform/Linux	Add include/exclude filter for Linux memory metrics
+#1790	2020-07-21		finer grain control of systemd metrics
+#1793	2020-07-21		go 1.15 supports CurveID.String()
+#1794	2020-07-22		supervisord collector failed
+#1803	2020-07-31		Solaris/Illumos support
+#1814	2020-08-14		node_exporter can't retrieve metrics for DRBD 9.X
+#1817	2020-08-21		powersupplyclass metrics have missing and non-base units
+#1828	2020-08-31	mixins	mixins: Rename grafana dashboard
+#1829	2020-08-31	mixins	mixins: Add config option to add tags to grafana dashboards
+#1841	2020-09-08	bug,accepted,platform/Linux	Collector netclass/bonding leads to scrape timeouts
+#1843	2020-09-10		node_exporter distribution is not available for armv7be (big endian)
+#1844	2020-09-11	bug,platform/Linux	wifi collector not exposing all metrics on arm64 platform
+#1856	2020-09-25		Incorrect help text for sockstat metrics
+#1859	2020-10-05		Suddenly big number has happened on the graph
+#1860	2020-10-05		node_systemd_unit_state : show service description
+#1867	2020-10-14		duplicated readings on Smartctl
+#1874	2020-10-21		node_md_* does not show RAID syncing
+#1889	2020-11-17		Feature adjustment --rootfs.path
+#1890	2020-11-18	enhancement,mixins	Swap is missing in the dashboard
+#1915	2020-12-17	bug,accepted	netclass collector fails while trying to get metrics from ignored devices
+#1925	2021-01-10		node_netstat kpi for Mac OS
+#1945	2021-01-26	enhancement,accepted,help wanted	ZFS collector uses different names for the same metric on FreeBSD vs Linux
+#1956	2021-02-06	enhancement,pending/close	TCP Checksum error stats in node_exporter
+#1970	2021-02-15		caller=collector.go:161 msg="collector failed" <...> err="couldn't get dbus connection: write unix @->/run/dbus/>
+#1987	2021-03-03		Node exporter crash with textfile collector turned on in 1.0.1 and 1.1.1 on OS X 10.9.5
+#1988	2021-03-04		Support openmetrics format in the text file collector
+#2025	2021-04-22		Node exporter reporting data for too many CPUs on FreeBSD
+#2041	2021-05-17		xvda[0-9]+ disks (not partitions) are ignored by default
+#2068	2021-07-05	accepted	ZFS: io stats removed
+#2097	2021-07-22	accepted,help wanted,good first issue	Request to add label for mount point to mountstats
+#2121	2021-08-16		Ephemeral ports usage metrics
+#2184	2021-10-28	enhancement	vdostats in node_exporter
+#2204	2021-11-09		cpufreq exporter repeated fails to read cpu frequency without elevated permissions.
+#2213	2021-11-16	enhancement	Add translation layer to support breaking metric
+#2217	2021-11-25	bug,accepted	EXC_BAD_ACCESS (Code Signature Invalid) on M1 
+#2219	2021-11-25		FreeBSD rc.d system collector missing
+#2231	2021-12-01	enhancement	Feature request: expose ioerr_cnt metrics
+#2241	2021-12-08		Diskstats collection negation regex not working
+#2243	2021-12-09		make error
+#2264	2022-01-07		Collect nf_conntrack_count from every namespace on host
+#2269	2022-01-19		err="read /sys/class/powercap/intel-rapl:0/energy_uj: invalid argument"
+#2286	2022-02-09		HTTP2 not working
+#2290	2022-02-13	enhancement	Feature request: tls metrics from /proc/net/tls_stat
+#2296	2022-02-25		Fail to test with version 1.3.1 under RISC-V
+#2300	2022-03-01		Compressed filesystem missing in node_filesystem_size_bytes and node_filesystem_free_bytes
+#2302	2022-03-02		Complete Documentation of the Metrics 
+#2312	2022-03-10		cpufreq collector is useless
+#2336	2022-04-03	enhancement,accepted,good first issue	Replace netstat parsers with procfs netstat  parsers
+#2338	2022-04-06		USE Method (cluster) dashboard - CPU Utilisation query
+#2356	2022-04-25	accepted	Node exporter always return 143 when receiving a SIGTERM
+#2371	2022-05-09		Number of PIDs  is wrong
+#2384	2022-05-26	accepted	node_md_state did not capture "removed" state
+#2386	2022-05-31		Add support for Linux SAS PHY counters
+#2399	2022-06-12		 node_filesystem_device_error for glusterfs 
+#2423	2022-07-11		ZFS read/write/checksum error counts
+#2458	2022-08-31		ZFS resilvering status metric
+#2469	2022-09-14		perf collector not working on EPYC CPU
+#2490	2022-09-29		Enhance tcpstat collector
+#2491	2022-09-29	enhancement,accepted,help wanted,platform/Linux	`NF_CONNTRACK_PROCFS` is obsolete and disabled by default in recent kernels
+#2506	2022-10-12		node_filesystem_readonly showing wrong information
+#2510	2022-10-18	enhancement,accepted	Work (bug?) powersupplyclass on kernel 3.18.140
+#2514	2022-10-21	bug,accepted	node_filesystem collector unable deduplicate data from multihomed mounts like nfs
+#2523	2022-11-07		Feature Request: Default Mem/CPU alerts added to the mixin
+#2568	2023-01-04		Even though node_intr_total metrics is of counter type, it's value reduced
+#2585	2023-01-26		RFE: The systemd collector should have a timeout
+#2595	2023-02-10		Is there some metrics about bare disk(not mounted) capacity?
+#2604	2023-02-17		CPU collector keeps reporting metrics of offline CPUs
+#2607	2023-02-22		Documents related to node_exporter metrics
+#2611	2023-02-27		[Question] Can node_exporter support Android?
+#2639	2023-03-21		Darwin M1 temperature reading via SMC
+#2640	2023-03-23		feat: optional disabled by default collector for /proc/vmallocinfo to make bpf jit usage observable
+#2642	2023-03-25		Unraid OS/md driver causes console error; error parsing mdstatus: error parsing mdstat "/proc/mdstat"
+#2664	2023-04-21		[Feature request] Add sensor label to node_hwmon_temp_celsius
+#2690	2023-05-15		Expose prometheus/procfs mountpoint NFS operations errors
+#2693	2023-05-18		Feat: expose per-dataset metrics in the ZFS collector on FreeBSD
+#2707	2023-06-01		textfile collector won't send any metric to prometheus server
+#2713	2023-06-06		Filesystem metric to report on encrypted mounts
+#2727	2023-06-23		timex status bitmap fields
+#2733	2023-07-02		as a user, i'd like btrfs subvolume metrics
+#2751	2023-07-18		Index out of range error in parseMemInfo for linux
+#2774	2023-08-15		node_disk_filesystem_info missing via container
+#2795	2023-09-06		Node Exporter leaving OPENFILE marker on pvc host paths
+#2799	2023-09-11	bug,accepted	Node exporter complains about unknown metric lines from NFSd on Linux 6.6-rc1
+#2805	2023-09-15		Metric was collected before with the same name and label values
+#2809	2023-09-22		FreeBSD: couldn't get uname: cannot allocate memory
+#2846	2023-11-14		Infiniband metrics: still not collected when irdma is loaded (PE 1.7.0)
+#2847	2023-11-15		node_exporter collector failure for zfs err="couldn't get sysctl: no such file or directory"
+#2871	2023-12-11		node-exporter daemonset keeps on creating new pods 
+#2904	2024-01-22		Can not collect the "ID_ATA_ROTATION_RATE_RPM" of disks?
+#2906	2024-01-24	bug,accepted	err="no CPU power status has been recorded" on M3
+#2972	2024-03-22		Network card status confuses me
+#2976	2024-03-25		filetem ntrices prompts that the string description is inaccurate
+#2986	2024-04-11		Node exporter not picking up sensors output and hence sensors metrics are not exported
+#3001	2024-04-20		Feature request:  Please sign your releases
+#3005	2024-04-26	enhancement,platform/Linux	Disk and filesystem error metrics
+#3052	2024-06-15		Error when reading same metrics from multiple files, one with and one without a HELP entry
+#3053	2024-06-16		Node_exporter isn't reading transmit data on enp1s0
+#3058	2024-06-21		Exporter may freeze if network file system is unavailable
+#3070	2024-07-03		runit collector reports invalid (outdated) service state if runsv (supervisor process) is not running
+#3084	2024-08-05		several collectors fail on OpenBSD 7.5
+#3088	2024-08-20	enhancement	Qdisc collector does not expose queues with a parent
+#3092	2024-08-22		Add Support for GPU Clock Frequencies (sclk and mclk) in hwmon Collector
+#3110	2024-09-04		expose scheduled shutdown times
+#3118	2024-09-11	require/feedback	The status value of TCP close_cait cannot be counted, but it actually has a value
+#3137	2024-09-29		Add the ethtool counters related to RDMA/ROCE
+#3142	2024-10-02		Problem with textfile collector combined with --web.config.file option
+#3152	2024-10-10		the /sys/devices/system/cpu/isolated file is null ,Node-exporter fails to start
+#3180	2024-11-10		end-to-end test fails on riscv64 machine
+#3183	2024-11-13		Option to disable help text to save ~40 % bandwith
+#3194	2024-11-30		node_exporter not reporting filesystem metrics for additional volume mounts in Docker
+#3238	2025-02-06		CPU collector broken on illumos
+#3257	2025-02-19		Ability to resolve device mapper to drive name
+#3260	2025-02-24		RFE: Support all Linux kernel NFSv4 client and server RPC operations
+#3261	2025-02-28		Bind-mounting a filesystem to its original mount path causes a duplicate metric error
+#3276	2025-03-22		feat: Add btrfs discard stats
+#3306	2025-04-16		feat: Ability to collect /proc/fs/fscache/stats
+#3308	2025-04-17		question: grafana dashboard
+#3310	2025-04-25		(null)": invalid syntax
+#3319	2025-04-28		feat: Add miimon on linux bonding
+#3320	2025-04-29		Does not report temperature of ryzen 9 9950x on Debian 12
+#3325	2025-05-02		Add mounts status to node_systemd_unit_state metric
+#3346	2025-06-16		panic: fatal enror: unexpected signal during runtime execution [signal SIGSEGV: segmentationvialation code=0x8e addr-ex0 pc=8xs5cac23dd6d4]
+#3347	2025-06-17		node_systemd_unit_state metrics silently ignores units that systemd failed to load
+#3356	2025-07-06	accepted	count number of hung tasks
+#3361	2025-07-15		request/question: clarify Podman deployment
+#3366	2025-07-31		Feature Request: Add vm_sysctl collector to expose /proc/sys/vm/* tunables like vm.max_map_count
+#3380	2025-08-13		Add a new way to filter mount points
+#3383	2025-08-20		FIPS Compliant Version of node_exporter
+#3390	2025-08-27		OpenBSD IPV6 bad behaviour
+#3392	2025-09-01		feat:  add `node_network_address_valid_lft` and `node_network_address_preferred_lft` metrics
+#3400	2025-09-04		Exclude filesystem metrics by device name
+#3434	2025-10-02		Limit which "pfs" when querying mellanox cards
+#3435	2025-10-02	accepted	ZFS DDT metrics
+#3451	2025-10-24	enhancement,platform/Linux	Please collect data from /sys/firmware/devicetree/base/
+#3460	2025-10-31		Meminfo metric naming inconsistency
+#3477	2025-11-09		node_exporter OCI images can't run as non-root and use CAP_PERFMON in kubernetes
+#3483	2025-11-22		磁盘数据大小采集出错
+#3496	2025-12-02		[BUG] Cannot run `healthcheck` with `wget` for `node-exporter` when running with TLS
+#3497	2025-12-02		[FEATURE] add processor cstate metrics
+#3500	2025-12-07	bug,accepted,platform/Linux	Linux mdadm collector fails if any software RAID array has a delayed check or resync
+#3506	2025-12-17		The slabinfo collector produces duplicate metrics on a host with Mellanox cards
+#3518	2026-01-17		Add Netfilter Queue (NFQUEUE) Collector
+#3522	2026-01-23		feat: Generic PCI AER metrics
+#3528	2026-01-29		Linux mdadm error parsing mdraids - Invalid syntax since version 1.10.0
+#3530	2026-01-31		[1.10.2] error parsing file: Too few fields in mount string
+#3586	2026-03-23		feat(ethtool): query SFP module diagnostics from EEPROM
+#3633	2026-04-21		[BUG] No Custom Paths for EDAC scraping
+#3636	2026-04-23		ubuntu 26.04, node_exporter 1.11.1, XFS collector fails to collect "xpc" field
+#3649	2026-05-07		Feature Request: Improve systemd collector with system state info and DBus timeouts
+#3673	2026-06-01		Duplicate node_hwmon_temp_* values
+#3674	2026-06-01		Add per-process schedstat metrics collector
+#3688	2026-06-12		[feature request] support Intel CPU Uncore Frequency
+#3689	2026-06-12		Conflicting help texts for node_cpu_frequency_hertz
+#3697	2026-06-29		Feature request: Add support for cpuinfo_avg_freq
+#3700	2026-07-01		Metric names with dots
+#3721	2026-07-10		[feature request] append the name of a pci device to node_pcidevice_info
+#3722	2026-07-10		edac: support the DIMM/rank sysfs layout (skx_edac / i10nm_edac / sb_edac) in addition to csrow*/chN
+#3754	2026-07-23		v1.12.1 hash mismatch
+#3755	2026-07-23		node_filesystem_readonly reports writable filesystem as read-only after upgrade to 1.12.0/1.12.1
+#3761	2026-07-27		ZFS collector misparses dataset values that occur in the kstat field prefix

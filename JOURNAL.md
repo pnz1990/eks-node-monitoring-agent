@@ -112,3 +112,43 @@ not the code.
 then P1 (resilience R1–R5) before individual bug fixes.
 
 ---
+## [2026-07-28T22:05Z] P0 complete — issue snapshot + fatal-failure-mode sweep
+
+**Phase:** triage
+**Status:** confirmed
+
+**What I did:**
+```bash
+gh issue list --repo prometheus/node_exporter --state open --limit 300 --json ... \
+  > evidence/upstream-issues/open-issues-2026-07-28.tsv     # 209 rows
+gh issue list --repo prometheus/node_exporter --state open --label bug ... \
+  > evidence/upstream-issues/open-bugs-2026-07-28.tsv       # 12 rows
+grep -iE "panic|deadlock|hang|leak|timeout|OOM|race|crash|stuck" open-issues-*.tsv
+```
+
+**What I observed** — the `bug` label undercounts fatal failure modes. Beyond the 12:
+
+| Issue | Label | Failure mode |
+|---|---|---|
+| #1007 | bug | **Panic + crash** when supervisord absent |
+| #3346 | *(none)* | **SIGSEGV** `fatal error: unexpected signal during runtime execution`, linux/amd64, 2025-06 |
+| #1987 | *(none)* | **Crash** with textfile collector enabled |
+| #1353 | *(none)* | **Stuck NFS mount** — the indefinite-hang class |
+| #1841 | bug | Scrape **timeouts** from netclass/bonding |
+| #2585 | *(none)* | RFE: systemd collector needs a **timeout** (i.e. it has none) |
+| #3649 | *(none)* | RFE: systemd collector needs **DBus timeouts** |
+
+**Conclusion:** This substantially strengthens the P1-before-P2 ordering. There are at least **three
+distinct crash/segfault reports** and **three distinct hang/timeout reports** in the open tracker, only
+two of which carry the `bug` label. Upstream tolerates this because a crashed node_exporter loses
+metrics; in our fork the same crash takes down `NodeCondition` reporting that feeds EKS node auto
+repair.
+
+Two of these (#2585, #3649) are *feature requests asking upstream for timeouts that still do not
+exist* — meaning upstream has no per-collector timeout mechanism at all. Anything we build there is a
+genuine improvement over PNE, not a catch-up.
+
+**Next:** P1 — implement and test R1 (panic containment) and R2 (per-collector timeout). Both must be
+demonstrated to fail without the guard.
+
+---
