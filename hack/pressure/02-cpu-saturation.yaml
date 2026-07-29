@@ -1,0 +1,38 @@
+# CPU saturation: pins every core so collection competes for CPU.
+#
+# Targets cpu/loadavg/stat/pressure collectors, and answers whether the agent's
+# own CPU limit throttles metric collection when the node is busiest — which is
+# precisely when metrics matter most. Upstream PNE deliberately ships with NO cpu
+# limit for this reason; the agent has one.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cpu-saturation
+  namespace: default
+spec:
+  selector:
+    matchLabels: {pressure: cpu-saturation}
+  template:
+    metadata:
+      labels: {pressure: cpu-saturation}
+    spec:
+      nodeSelector: {pressure: "true"}
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: burn
+          image: public.ecr.aws/amazonlinux/amazonlinux:2023
+          command: ["sh", "-c"]
+          args:
+            - |
+              n=$(nproc)
+              echo "saturating $n cores"
+              i=0
+              while [ $i -lt $n ]; do
+                ( while :; do :; done ) &
+                i=$((i+1))
+              done
+              wait
+          resources:
+            requests: {cpu: 100m, memory: 16Mi}
+            limits: {memory: 64Mi}

@@ -606,3 +606,78 @@ this remains a design argument rather than a measurement.
 **Next:** P3 — scale the cluster and apply pressure. Requires cost approval first (personal account).
 
 ---
+## [2026-07-29T01:40Z] P3 pressure testing — results, and the memory finding
+
+**Phase:** P3 pressure
+**Status:** confirmed
+
+**Setup:** scaled to 6 nodes (4x t3.large amd64, 2x m7g.large arm64), EKS 1.36, both exporters
+co-resident, one Prometheus. Applied pod churn (~2,888 live pods, 3,000-completion Job at parallelism
+30), CPU saturation (all cores, every node), and mount churn (4 emptyDir volumes per pod).
+
+**Incidental finding — multi-arch was required and initially broken.** The first arm64 rollout hit
+`exec /opt/bin/eks-node-monitoring-agent: exec format error` on both m7g nodes: the image was amd64-only.
+Rebuilt with `docker buildx --platform linux/amd64,linux/arm64`. Also learned that a backgrounded
+`docker buildx` is killed when its wrapper exits — the first attempt reported exit 0 while never
+pushing, and only checking ECR revealed it. **Do not trust an exit code for a detached build; verify the
+artifact.**
+
+**Results under pressure:**
+
+| Measure | NMA | PNE | Reading |
+|---|---|---|---|
+| Total series | 4,726 | 4,737 | parity holds under churn |
+| Filesystem series | 24 | 24 | the hostPID fix holds under churn |
+| **Max collector duration** | **0.138s** | 0.681s | **NMA ~5x faster** |
+| `up` over 15m | 1.0 | 1.0 | neither dropped a scrape |
+| Goroutines | 115 (peak 117) | 8 (peak 9) | flat |
+| Open fds | 28 (peak 29) | 9 | flat |
+| Resident memory | 65MB (peak 81MB) | 23MB | investigated below |
+| panics / timeouts contained | 0 / 0 | n/a | guard never had to fire |
+
+**An earlier reading was misleading and I nearly recorded it as a finding.** Mid-rollout I measured NMA
+3,005 series vs PNE 5,271 and briefly took it as a real divergence. It was rollout skew — NMA pods were
+restarting while PNE's were steady. After the rollout settled the counts converged (4,726 vs 4,737).
+**Lesson repeated from the rate() window error: do not measure across a rollout.**
+
+**The memory finding, investigated properly rather than asserted:**
+
+Initial reading was alarming — `deriv(process_resident_memory_bytes[15m])` = **+10,147 B/s** for NMA
+versus +79 B/s for PNE, with a 27MB range. That is the shape of a leak.
+
+Tested by stopping all churn and watching for recovery:
+```
+during churn   deriv=+10147 B/s   peak 80.6MB
+churn drained  deriv= +3971 B/s   now  65.1MB
++9 min         deriv= +1258 B/s   now  65.6MB
+```
+Memory *fell* from the 81MB peak back to ~65MB, the derivative decayed monotonically, and goroutines and
+fds stayed flat the whole time. Per-node values converged tightly (64.6–66.4MB) across **both**
+architectures.
+
+**Conclusion: Go heap working set under load, not an unbounded leak.** But this is still a real finding
+worth reporting rather than dismissing: 65MB steady-state against the chart's **200Mi** limit is a third
+of the budget before the health monitors' own usage, and it was measured with `includeExporterMetrics`
+enabled. The resource envelope needs revisiting before wide rollout, and on Auto Mode it feeds
+`EKSTachyonAMIOverhead` -> Karpenter bin-packing -> customer allocatable.
+
+**Prediction PR7 (the load-bearing one) — outcome:** NMA did **not** degrade worse than PNE under
+identical pressure. It was ~5x faster on max collector duration and equal on scrape success. The
+in-process design is not a liability under load. Memory is the single axis where it costs more, and that
+cost is bounded and explained.
+
+**Predictions PR1/PR3 — NOT confirmed, and I should say so plainly:** pod churn at 2,888 pods did *not*
+reproduce netclass instability (#1841/#1915), and collector latency did *not* grow superlinearly —
+netclass peaked at 0.331s and the guard never fired. Either the churn window is narrower than the
+reproduction suggests, VPC CNI's warm-pool behaviour means veth devices are not created and destroyed as
+aggressively as I assumed, or 2,888 pods over ~40 minutes is not enough churn *rate*. The deterministic
+fixture reproduction in `/tmp/netclassrepro` still stands as proof the code path is broken; what is
+unproven is how often it fires in practice on EKS.
+
+**Not tested (named blind spots, not assumed passes):** memory-pressure/near-OOM, disk-I/O saturation,
+GPU/Neuron nodes, Bottlerocket, multi-hour soak, scrape-storm (manifest written but not run).
+
+**Next:** document design and tradeoffs (done: `docs/design/node-exporter-parity.md`), then P5 edge
+cases and linters. Scale back to 2 nodes to cut cost.
+
+---

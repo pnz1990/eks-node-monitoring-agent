@@ -1,0 +1,41 @@
+# Scrape storm: many concurrent scrapers against both endpoints.
+#
+# Exercises MaxRequestsInFlight. The endpoint should shed load with 503 rather
+# than queue unboundedly or collapse, and it must not starve the agent's health
+# monitoring while doing so.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: scrape-storm
+  namespace: default
+spec:
+  selector:
+    matchLabels: {pressure: scrape-storm}
+  template:
+    metadata:
+      labels: {pressure: scrape-storm}
+    spec:
+      hostNetwork: true
+      nodeSelector: {pressure: "true"}
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: storm
+          image: public.ecr.aws/amazonlinux/amazonlinux:2023
+          command: ["sh", "-c"]
+          args:
+            - |
+              command -v curl >/dev/null 2>&1 || dnf install -q -y curl >/dev/null 2>&1
+              # 20 concurrent scrapers per node against each exporter.
+              i=0
+              while [ $i -lt 20 ]; do
+                ( while :; do
+                    curl -s -o /dev/null --max-time 10 http://127.0.0.1:9101/metrics
+                    curl -s -o /dev/null --max-time 10 http://127.0.0.1:9100/metrics
+                  done ) &
+                i=$((i+1))
+              done
+              wait
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 128Mi}

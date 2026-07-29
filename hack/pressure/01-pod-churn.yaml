@@ -1,0 +1,35 @@
+# Pod churn: drives veth interface and per-pod mount creation/destruction.
+#
+# This is the pressure that exercises upstream #1841/#1915. The netclass
+# collector enumerates network devices then reads each one, aborting the whole
+# collector on the first read error, so an interface that disappears between
+# listing and reading suppresses ALL netclass metrics. Only churn opens that
+# window.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pod-churn
+  namespace: default
+spec:
+  parallelism: 30
+  completions: 3000
+  backoffLimit: 200
+  ttlSecondsAfterFinished: 60
+  template:
+    metadata:
+      labels: {pressure: pod-churn}
+    spec:
+      restartPolicy: Never
+      # Spread across the pressure nodes so every node sees churn.
+      nodeSelector: {pressure: "true"}
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: churn
+          image: public.ecr.aws/amazonlinux/amazonlinux:2023
+          # Short-lived on purpose: each pod creates then destroys a veth pair
+          # and per-pod mounts, which is the churn under test.
+          command: ["sh", "-c", "sleep 3"]
+          resources:
+            requests: {cpu: 5m, memory: 8Mi}
+            limits: {memory: 32Mi}

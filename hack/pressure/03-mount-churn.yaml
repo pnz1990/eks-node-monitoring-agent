@@ -1,0 +1,41 @@
+# Mount churn: each pod creates several emptyDir volumes, so pods cycling in and
+# out continuously add and remove per-pod mounts.
+#
+# Validates that the pod-ephemeral mount exclusion holds under churn rather than
+# only in a steady state, and that the filesystem collector does not accumulate
+# stale mount entries.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mount-churn
+  namespace: default
+spec:
+  parallelism: 20
+  completions: 1000
+  backoffLimit: 100
+  ttlSecondsAfterFinished: 60
+  template:
+    metadata:
+      labels: {pressure: mount-churn}
+    spec:
+      restartPolicy: Never
+      nodeSelector: {pressure: "true"}
+      tolerations:
+        - operator: Exists
+      volumes:
+        - {name: v1, emptyDir: {}}
+        - {name: v2, emptyDir: {}}
+        - {name: v3, emptyDir: {medium: Memory}}
+        - {name: v4, emptyDir: {medium: Memory}}
+      containers:
+        - name: churn
+          image: public.ecr.aws/amazonlinux/amazonlinux:2023
+          command: ["sh", "-c", "dd if=/dev/zero of=/v1/f bs=1M count=8 2>/dev/null; sleep 4"]
+          volumeMounts:
+            - {name: v1, mountPath: /v1}
+            - {name: v2, mountPath: /v2}
+            - {name: v3, mountPath: /v3}
+            - {name: v4, mountPath: /v4}
+          resources:
+            requests: {cpu: 5m, memory: 8Mi}
+            limits: {memory: 64Mi}
