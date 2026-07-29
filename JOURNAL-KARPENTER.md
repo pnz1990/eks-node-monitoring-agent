@@ -618,3 +618,83 @@ timestamps from Karpenter's log.
 **Lesson worth keeping:** an empty result from a *correct* check and an empty result from a *broken*
 check look identical, and the only way to tell them apart is to test the check itself. The watcher
 is now in place for K5 part 2, started before any fault.
+
+---
+
+## K6 — edge cases. E4/E5 pass, and a design property worth knowing
+
+**Date:** 2026-07-29 · **Status:** E4, E5 complete; the rest carried
+
+### K6.1 E5 PASS — a fresh Karpenter node does not emit a spurious Fatal
+
+This was flagged in the goal file as one of the two highest-value cases: a brand-new node starts
+with an **empty interface cache**, and `interfaceHasConsistentIssue` needs a *previous* observation
+to compare against. A bug in the `if !ok { continue }` path would mean **a spurious Fatal on every
+new node**, i.e. Karpenter replacing healthy nodes in a loop.
+
+Karpenter handed me three brand-new nodes at 23:07 (the K5 replacements), one per pool. After
+>20 minutes — past two 5-minute monitor periods, so the cache had been populated and compared:
+
+```
+[main]  ip-192-168-57-26   age=20m  NetworkingReady=True/NetworkingIsReady
+[dep]   ip-192-168-55-242  age=20m  NetworkingReady=True/NetworkingIsReady
+[nodep] ip-192-168-27-187  age=20m  NetworkingReady=False/IPAMDNotReady   <- MY injected fault
+```
+
+**No node reported `InterfaceNotUp`, `InterfaceNotRunning` or `MissingLoopbackInterface`.** The
+`nodep` node's `IPAMDNotReady` is the `fault-nodep` Job I was running there — verified by listing
+the Job's pod and its node — so it is an injected condition, not a spurious one. Checking the
+*reason* rather than just "is it False" is what makes that distinction possible.
+
+**E5 passes on all three variants.**
+
+### K6.2 E4 PASS — evict the agent, and its empty cache still produces no spurious Fatal
+
+Deleted the `nma-nodep` pod on a node and waited past two monitor periods:
+
+```
+new pod nma-nodep-rjg9m  Running  restarts=0
+NetworkingReady=False/IPAMDNotReady   <- still the injected fault, no interface reason
+```
+
+**E4 passes:** a rescheduled agent rebuilding its cache from empty does not fabricate an interface
+Fatal.
+
+### K6.3 FINDING F-K6-1 — a log-triggered Fatal has NO clearing path
+
+While waiting for the injected condition to clear after deleting the fault Job, it **did not** —
+held `False/IPAMDNotReady` for **10+ minutes**, well past the two monitor periods I expected.
+
+Cause, read from the code rather than guessed:
+
+- `IPAMDNotReady` is raised by **`handleIPAMDLogs(line)`** — a **log-observer** callback that fires
+  when a matching line is *tailed* from `/var/log/aws-routed-eni/ipamd.log`
+  (`monitors/networking/monitor.go:294-308`).
+- Conditions are set to `True` **only at startup**: `main.go:273` states plainly that
+  *"NodeExporter unconditionally sets all provided conditions to ConditionTrue"*, once, when
+  building `conditionConfigs`.
+- **There is no periodic re-check that resets `IPAMDNotReady`.** Unlike
+  `InterfaceNotUp`/`InterfaceNotRunning`, which are re-evaluated every 5 minutes against live
+  interface state, a log-triggered reason is **one-way**: once observed, the condition stays False
+  for the lifetime of the agent process.
+
+**This is a design property, not obviously a defect** — for a genuine IPAM-D failure, "it printed an
+error once" arguably *should* be sticky, and node replacement is the intended remedy. But the
+consequences are worth stating:
+
+1. **A transient IPAM-D blip permanently marks the node unhealthy**, and after 30 minutes Karpenter
+   will forcefully replace it. A single log line, even from a condition that self-recovered, is
+   sufficient to destroy a node.
+2. **It explains F-K1-1's intermittency.** I recorded the condition "self-clearing" in ~15 min in K1
+   and holding 32 min in K5, and called that intermittent. The real mechanism is that **the
+   condition only clears when the agent process restarts** — in K1 the pod was being restarted by
+   the probe-port bug (F-K3-1, 4 restarts each), which reset the condition. Once that was fixed, the
+   condition stopped clearing. **My "intermittent self-clearing" was actually a side effect of a
+   different bug I had not yet fixed.**
+3. **It affects all three variants identically** — this is stock `main` behaviour in
+   `monitors/networking`, untouched by either fork. **Classification: PRE-EXISTING**, and the K2
+   phase ordering is what allows that to be said with confidence.
+
+**Not filed as a blocker for the forks**, because it is neither caused nor worsened by them. Raised
+as an NMA finding for the owners: *is a permanently sticky Fatal from a single log line the intended
+behaviour, given Karpenter will now forcefully replace the node 30 minutes later?*
