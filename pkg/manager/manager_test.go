@@ -51,7 +51,18 @@ func (e *mockExporter) Fatal(context.Context, monitor.Condition, corev1.NodeCond
 }
 
 func TestManager_Notification(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.TODO(), time.Millisecond)
+	// 5s, not 1ms. This test waits for a condition to travel monitor -> manager ->
+	// exporter across two goroutines and a channel, and a 1ms deadline is shorter than
+	// the Go scheduler needs for that on a loaded machine: it failed with "context
+	// deadline exceeded" during a full-module `go test -race` run and passed in
+	// isolation, which is the signature of a timing-dependent test rather than a broken
+	// one.
+	//
+	// The timeout is a SAFETY NET here, not the thing under test -- the select below
+	// returns as soon as the notification arrives, so a healthy run is still
+	// sub-millisecond and a hang still fails rather than blocking forever. Making it
+	// generous costs nothing and removes a flake that reads as a real regression.
+	ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
 	defer cancel()
 
 	mockMon := &mockMonitor{

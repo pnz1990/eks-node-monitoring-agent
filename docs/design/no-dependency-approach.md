@@ -172,11 +172,32 @@ than lumped together:
 Two are genuine field bugs; three are robustness gaps found by adversarial testing.
 Conflating them would overstate the case, so they are tracked separately.
 
-**#3 is the one that matters.** Upstream returns on the first device read error, so one
-interface disappearing mid-scrape suppresses metrics for *every* interface. On a static host
-that window is almost never hit — which is why it has been open since 2020. On EKS the VPC
-CNI creates and destroys veth/eni interfaces on **every pod schedule**, so it is hit
-routinely. Same code, different failure rate.
+**#3 is the one that matters, and it is no longer a theoretical argument.** Upstream returns
+on the first device read error, so one interface disappearing mid-scrape suppresses metrics
+for *every* interface. On a static host that window is almost never hit — which is why it has
+been open since 2020. On EKS the VPC CNI creates and destroys veth/eni interfaces on **every
+pod schedule**, so it is hit routinely. Same code, different failure rate.
+
+**Reproduced in the field, 2026-07-29** (`evidence/q3-scale-test.md`). Under sustained pod
+churn at 2,434 pods on a 6-node cluster, pne's `netclass` collector reported
+`success=0` while **both agents reported `success=1` on the same node in the same scrape
+pass**:
+
+```
+node_scrape_collector_success{collector="netclass"}
+  sample 6 / 2,434 pods    pne=0    nma-dep=1    nma-nodep=1
+```
+
+pne's failing-collector count went from 10 (the absent-hardware set) to 11, the addition being
+`netclass`. `netdev` was unaffected in the same samples, which corroborates rather than
+contradicts: its default backend is netlink, so it never performs the per-device sysfs reads
+that #1915 concerns.
+
+**This is worth stating carefully, because an earlier run at comparable scale did not
+reproduce it** and that negative was recorded plainly as *"PR1 — did not reproduce"*. The
+prediction was correct; the earlier miss was a matter of churn *rate*, not of the reasoning
+being wrong. Two runs, one negative and one positive, is what the claim now rests on — so:
+reachable, demonstrated once in 11 samples, rate unknown.
 
 **On the dependency branch, #3 can only be contained** (the resilience boundary catches the
 consequences); the collector still returns nothing. On the native branch it is **fixed at
@@ -237,10 +258,11 @@ Reasoning:
    implementation and the regression test for it. If upstream takes it, the dependency
    branch inherits the fix and the strongest argument for owning 8,523 lines goes away.
 
-3. **The performance gap is not yet an argument.** ~15× is large, but it is a finding about
-   the dependency branch's relay buffer plus an unidentified remainder — likely fixable
-   there. Recommending on performance before Q8 is resolved would be recommending on a
-   number I cannot fully explain.
+3. ~~**The performance gap is not yet an argument.**~~ **RETRACTED — there is no performance
+   gap.** The ~15×/~250× figures were an artefact of summing concurrent wall-clock durations
+   (§3). On wall time the three are within ~1.5× of each other. **Performance should carry no
+   weight in this decision in either direction.** The instinct not to lean on an unexplained
+   number was right; the number itself was not real.
 
 4. **Ownership cost is recurring and real.** Every upstream release becomes a per-collector
    diff. Worth paying to fix a bug upstream will not take; not worth paying pre-emptively.
@@ -250,13 +272,52 @@ single fix is the difference between "a dependency with a known, contained bug" 
 dependency with a known bug that hits us on every pod schedule" — and in the latter case
 owning the code is clearly correct.
 
+### What the 2026-07-29 runs changed, and what they did not
+
+**The recommendation stands, but reason 2 is now stronger and reason 3 is gone.**
+
+- **#1915 is demonstrated, not argued** (§4). pne's `netclass` failed under churn where both
+  agents held. This does not change *which branch to ship first* — it raises the priority of
+  **raising the issue upstream**, because there is now a reproduction to attach to it, and it
+  is the step everything else in the sequencing depends on.
+- **Performance is off the table** (reason 3, retracted above).
+- **Q3 is answered:** the native branch holds at 2,938 pods — 0 panics, 0 timeouts, 0
+  restarts. The scale gap in §7 is closed.
+- **Two defects were found in the agent, not upstream** (Q9): a duplicate error-counter
+  registration failing *every* scrape, and a silent gather error that hid it for 13 hours.
+  Both are fixed on this branch and both apply to `pkg/metrics`, i.e. **to the dependency
+  branch too** — they must be carried across whichever ships.
+- **A new finding that belongs to neither branch:** the mount exclusion is an *availability*
+  property, not just cardinality hygiene. pne restarted 8 times under churn — killed by its
+  own liveness probe, not by the OOM killer — while its `node_filesystem_readonly` cardinality
+  tracked pod count and both agents stayed flat at 4 series. Partly attributable to the
+  exclusion (a measured 4.7× endpoint speed-up) and partly to the agents probing a separate
+  `/healthz` port; the two are separable and both are recorded in
+  `evidence/q3-scale-test.md`.
+
+**What none of this resolves:** the ownership cost (reason 4) is unchanged, and it remains the
+substance of the decision. 8,523 lines to own against 840 lines of integration is the trade,
+and it is not a measurement question.
+
 ### Sequencing
 
-1. Raise #1915 upstream with the regression test from `pkg/hostmetrics/netclass_test.go`.
-2. Split the dependency branch into a clean PR (Q6: ~1–2h; of 10,825 insertions only ~3,566
+1. **Raise #1915 upstream** with the regression test from `pkg/hostmetrics/netclass_test.go`
+   **and the field reproduction from `evidence/q3-scale-test.md`.** Now the highest-value step
+   and better supported than when this was written: the issue has been open since 2020 largely
+   because it is hard to trigger on a static host, and there is now a same-node, same-scrape
+   demonstration that it fires on EKS under pod churn. **Needs a go-ahead — it is a public post
+   to a repository we do not own (Q4).**
+2. **Carry the Q9 fixes into whichever branch ships.** They are in `pkg/metrics`, so they apply
+   to the dependency branch identically: the duplicate error-counter registration was failing
+   *every* scrape with `includeExporterMetrics: true`, and the missing `ErrorLog` is why nobody
+   noticed. Not optional cleanup — the endpoint was serving partial responses.
+3. Split the dependency branch into a clean PR (Q6: ~1–2h; of 10,825 insertions only ~3,566
    are shippable — `evidence/` contains account IDs and Grafana credentials).
-3. Resolve Q8 (the latency floor) — it affects whichever branch ships.
-4. Hold the native branch. Merge if upstream declines #1915, or when the ownership cost is
+4. ~~Resolve Q8 (the latency floor)~~ — **done, and it was a harness bug, not a code one.** No
+   action remains for either branch.
+5. **Decide Q10** (the `cpu: 250m` default and unmanaged `GOMAXPROCS`). Independent of this
+   choice, affects every EKS node, and cheap to fix.
+6. Hold the native branch. Merge if upstream declines #1915, or when the ownership cost is
    justified by a second such fix.
 
 ### One thing to decide either way
@@ -280,9 +341,28 @@ Two scrapes seconds apart legitimately differ on every counter, so that needs a 
 `rate()` window — the V3/V4 tier from the dependency branch, driven from Grafana. Structural
 and success-value agreement is strong evidence but not proof that every number matches.
 
-**Scale tested:** 2 nodes, 70 pods under pressure. The dependency branch was previously
-measured at ~2,888 pods across 6 nodes; the native branch has not been tested at that scale,
-and that gap is a cost decision rather than a technical one (Q3).
+**Scale tested:** ~~2 nodes, 70 pods~~ — **closed 2026-07-29.** 6 nodes, peak **2,938
+concurrent pods**, 3,000 churn completions, 11 samples over ~25 min, all three variants
+co-resident and scraped in the same pass. The native branch held: 0 panics, 0 timeouts, 0
+restarts, constant collector-failure count. `evidence/q3-scale-test.md`.
 
-**Unexplained:** the remaining factor in the latency floor beyond the ~4× the channel
-accounts for (Q8).
+**Unexplained:** ~~the remaining factor in the latency floor~~ — **nothing.** Q8 is closed:
+there was no latency floor, only a harness that summed concurrent wall-clock durations. Both
+rejected hypotheses (CPU throttling, the relay channel) are recorded with their negative
+results in `OPEN-QUESTIONS.md`.
+
+**Still open, and honest about it:**
+
+- **Values are not compared across variants.** Unchanged, and still the right call — but Q9
+  showed the cost: `promhttp_metric_handler_errors_total{cause="gathering"}` sat at **3,182 on
+  nma-dep, 9 on nma-nodep, 0 on pne**, incrementing once per scrape, so *every* scrape of both
+  agents served a partial response for 13 hours. The name was present and the series count was
+  right, so T1/T2/T3 could not see it. A `rate()`-window tier would have.
+- **#1915's failure *rate* is unknown.** Reproduced once in 11 samples, and *not* reproduced in
+  an earlier run at comparable scale. Reachability is established; frequency is not.
+- **`nma-dep` containing #1915 is not the same as fixing it.** Its `netclass` did not fail in
+  this run, which is evidence and not a guarantee.
+- **Q10 (new):** both agents are CPU-throttled at the chart-default `cpu: 250m` — nma-dep 5,124
+  throttle periods / 337.9s throttled — with `GOMAXPROCS` unmanaged and observed at 2 against a
+  0.25-core quota. Harmless today against a 15s interval; it is a fact about the shipped
+  default and needs an owner's decision.
