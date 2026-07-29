@@ -936,3 +936,130 @@ passing self-test · 250 tests (was 186) · `.covignore` untouched.
 `entropy`, `filefd`.
 
 ---
+## N3 — `pressure` (PSI) and the four small ones: `uname`, `entropy`, `filefd`, `schedstat`
+
+### The cross-collector unit hazard, and why I measured instead of trusting the docs
+
+`pressure` divides by **1e6** (microseconds); `schedstat`, in the same package, divides by **1e9**
+(nanoseconds). Copying either constant to the other is a silent 1000x error **in either direction**, and
+both wrong answers look plausible — a 1000x-too-small pressure reading is indistinguishable from a
+healthy node.
+
+I did not take the unit from the kernel docs. `/proc/pressure/cpu`'s `some` total, bounded against
+uptime:
+
+```
+uptime 1429441s, cpu some total = 32151574389
+  as microseconds ->    32151.6s =   2.249% of uptime     plausible
+  as nanoseconds  ->       32.2s =   0.002% of uptime
+  as milliseconds -> 32151574.4s = 2249.2% of uptime      ARITHMETICALLY IMPOSSIBLE
+```
+
+Microseconds is the only interpretation that is both possible and plausible. `TestPSIUnitIsEmpirically-
+Microseconds` reruns that bound on whatever host it executes on — **and includes a guard that the bound
+is not trivially true**: it asserts that a 1000x-smaller divisor *would* exceed uptime, because otherwise
+"total ≤ uptime" proves nothing.
+
+**A measurement error of my own along the way:** my first attempt to extract the total used
+`awk '/^some/{print $4}'`, which returned `1.79` — the `avg300` field, not `total`. I noticed because the
+resulting percentages were absurd (0.0% of uptime for all three interpretations). Fixed with an anchored
+`grep -oP 'total=\K[0-9]+'`. Same family as the four prior extraction bugs: **anchor on the syntax you
+want, not on field position**.
+
+Negative controls, each mutating one constant:
+```
+pressure  1e6 -> 1e9   -> 4 failing tests
+schedstat 1e9 -> 1e6   -> 4 failing tests
+filefd    parts[2] -> parts[1] (the skipped middle field) -> 4 failing tests
+```
+
+### PSI: the some/full asymmetry is NOT uniform, and that shapes the metric set
+
+```
+cpu     some, NO full   (a fully-stalled CPU is not a meaningful state)
+irq     full, NO some   (by design; see linux include/linux/psi_types.h)
+io      both
+memory  both
+```
+So **4 resources yield 6 series, not 8**. Emitting `cpu_stalled` or `irq_waiting` would be inventing a
+measurement the kernel does not make, and both are asserted absent.
+
+**The partial-availability path is the live path here, not an edge case.** This host runs kernel 6.12 and
+`/proc/pressure` contains `cpu`, `io`, `memory` — **no `irq`**, which needs 6.1 *plus* the config. Live
+scrape confirms **5 series** rather than 6, exactly the branch
+`TestPSIMissingIRQFileDoesNotSuppressOtherResources` covers. A collector that failed wholesale on the
+missing irq file would lose PSI entirely on this kernel.
+
+`ENOTSUP` (PSI compiled in, disabled at boot) is distinguished from `ENOENT` (no CONFIG_PSI) and
+**stops immediately** rather than probing the remaining three resources, since it is system-wide. Asserted
+by counting calls — continuing would be three wasted syscalls per scrape forever.
+
+Why PSI matters more than anything else in this set for a Kubernetes node:
+`node_pressure_memory_stalled_seconds_total` rising means processes made **no progress** waiting for
+memory — the precursor to an OOM kill. A memory-utilisation gauge looks identical at 95% whether the node
+is fine or thrashing.
+
+### filefd: the middle field is a kernel lie
+
+`/proc/sys/fs/file-nr` has three TAB-separated values and the second — "free file handles" — has been
+**hardcoded to 0 since Linux 2.6**; the kernel stopped tracking it. Verified on this host:
+`11872\t0\t9223372036854775807`. Emitting it would publish a permanent zero that reads as a measurement,
+and an operator computing `allocated + free` would get a number wrong by construction. Upstream skips it
+and so do we, with the reason written down rather than left as a bare index.
+
+Taking `parts[1]` as the maximum is the plausible off-by-one, and it would make every fd-exhaustion
+dashboard read as permanently exhausted. Explicit test, plus a negative control.
+
+Also asserted: the split is on **TAB specifically**, not whitespace — a space-separated line must fail
+the field-count check rather than silently parse as one field.
+
+### uname: NUL padding, and a collector that Paths cannot fix
+
+`struct utsname` fields are fixed-size **NUL-padded** char arrays. `unix.ByteSliceToString` stops at the
+first NUL; `string(buf[:])` would embed the padding — which **Prometheus accepts as a label value** and
+every dashboard then silently fails to match. Asserted against the real syscall output.
+
+Recorded a scope note that applies to no other collector: `uname` is a *syscall*, so it ignores `Paths`
+entirely and reports the **container's** UTS namespace. That is correct only because the shipped DaemonSet
+sets `hostNetwork`/`hostPID` and therefore shares the host UTS namespace. A rebased procfs path would not
+fix it if that ever changed.
+
+Also added a seam for `unix.Uname`'s error branch: the syscall takes no arguments that could be invalid,
+so it cannot fail on a working host and the branch would otherwise ship untested.
+
+### schedstat: the CPU label must come from the file, not the loop index
+
+`/proc/schedstat` names CPUs (`cpu0`, `cpu12`) and **omits offline ones**. Using the loop index would
+silently renumber the survivors — on a node with cpu2 offline, cpu3's stats would be reported as cpu2's.
+Tested with a gap in the CPU list. Live: **96 series** (3 × 32 CPUs).
+
+`timeslices_total` is a plain count and must NOT be divided by 1e9; dividing it produces a near-zero that
+reads as an idle CPU.
+
+### A fifth extraction-regexp bug of my own — caught by a guard I had already added
+
+`TestUnameLabelNamesMatchUpstream` matched nothing: I assumed `"uname", "info",` was followed directly by
+`[]string{`, but upstream puts the label list on its own lines *after* the help string. It failed on
+`require.NotNil` rather than silently asserting over an empty list — **which is exactly why that guard
+exists**, and it is now paired with `require.Len(t, upstream, 6)` so an extraction returning a partial
+list also fails.
+
+### Live validation — 20 collectors
+
+```
+cpu 320  softnet 224  netclass 150  netdev 128  schedstat 96  filesystem 63  meminfo 49
+netstat 42  sockstat 20  diskstats 18  conntrack 10  vmstat 7  stat 6  pressure 5
+udp_queues 4  loadavg 3  arp 2  entropy 2  filefd 2  uname 1
+TOTAL 20 collectors, 1152 series, 0 errors, 0 nodata
+```
+
+**Gates:** coverage 100.0% · race clean · vet clean · staticcheck clean · no-dependency gate PASS ·
+301 tests (was 250) · `.covignore` untouched.
+
+**Progress: 20 of 39.** Past halfway.
+
+**Next:** `os`, `time`, `timex`, then the hardware group (`thermal_zone`, `powersupplyclass`, `cpufreq`,
+`edac`, `nvme`, `mdadm`, `btrfs`, `xfs`, `watchdog`, `dmi`, `infiniband`, `selinux`, `kernel_hung`,
+`dmmultipath`, `textfile`).
+
+---
