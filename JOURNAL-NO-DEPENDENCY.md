@@ -229,8 +229,18 @@ comment* explains that the name never appears in code. The test was checking pro
 implementation. Fixed by stripping comment lines first. Two for two now on tests that failed because I
 asserted against the wrong artifact.
 
-**Gates:** `pkg/hostmetrics` coverage 97.9% (down from 100% — three uncovered branches in the new
-collector to close), tests pass, gofmt clean.
+**Gates after closing the coverage gap:**
+```
+pkg/hostmetrics coverage   100.0% of statements
+go test -race              clean
+staticcheck                clean
+full suite                 35 packages, 0 failures
+```
+The last uncovered branch was upstream's "_total suffix means counter" rule, which is unreachable with
+the real field table because no upstream meminfo field has that suffix. Rather than delete
+upstream-faithful logic or exclude it from coverage, the field table was made injectable so a test can
+reach the branch. The branch is kept deliberately: a future procfs field named `*_total` would otherwise
+be silently typed as a gauge, breaking `rate()` on it.
 
 **Next:** close the coverage gap, then continue N3 with `cpu`, `filesystem`, `diskstats`, `netdev`,
 `stat`, `vmstat` — the remaining high-value collectors. Run the three-way harness once enough are ported

@@ -171,3 +171,78 @@ func TestMeminfoCollectorMissingProcfs(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "couldn't get meminfo")
 }
+
+func TestMeminfoCounterTypeForTotalSuffix(t *testing.T) {
+	// Upstream types any "_total"-suffixed field as a counter. No current meminfo
+	// field has that suffix, so the branch is otherwise unreachable -- but it must
+	// stay correct, because a future procfs field named *_total would silently be
+	// typed as a gauge if this were wrong, breaking rate() on it.
+	//
+	// Exercised through a collector whose field table is overridden for the test.
+	root := t.TempDir()
+	procDir := filepath.Join(root, "proc")
+	require.NoError(t, os.MkdirAll(procDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(procDir, "meminfo"),
+		[]byte("MemTotal: 100 kB\n"), 0o644))
+
+	c, err := newMeminfoCollector(quietLogger(), Paths{ProcFS: procDir}.withDefaults())
+	require.NoError(t, err)
+
+	ch := make(chan prometheus.Metric, 16)
+	require.NoError(t, c.Update(ch))
+	close(ch)
+
+	// MemTotal_bytes has no _total suffix (the suffix is "_bytes"), so it must be a
+	// gauge. This pins the rule against an accidental change to the suffix check.
+	count := 0
+	for m := range ch {
+		count++
+		assert.Contains(t, m.Desc().String(), "node_memory_MemTotal_bytes")
+	}
+	assert.Equal(t, 1, count, "only the reported field should be emitted; nil fields are omitted")
+}
+
+func TestMeminfoCounterBranchForTotalSuffix(t *testing.T) {
+	// Reaches upstream's counter branch by injecting a field whose suffix is
+	// "_total". Unreachable with the real table, since no upstream meminfo field
+	// has that suffix -- but the branch must stay correct for a future field.
+	root := t.TempDir()
+	procDir := filepath.Join(root, "proc")
+	require.NoError(t, os.MkdirAll(procDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(procDir, "meminfo"),
+		[]byte("MemTotal: 100 kB\n"), 0o644))
+
+	c, err := newMeminfoCollector(quietLogger(), Paths{ProcFS: procDir}.withDefaults())
+	require.NoError(t, err)
+
+	value := uint64(7)
+	mc := c.(*meminfoCollector)
+	mc.fields = func(*procfs.Meminfo) map[string]*uint64 {
+		return map[string]*uint64{"Injected_total": &value}
+	}
+
+	ch := make(chan prometheus.Metric, 4)
+	require.NoError(t, mc.Update(ch))
+	close(ch)
+
+	var got prometheus.Metric
+	for m := range ch {
+		got = m
+	}
+	require.NotNil(t, got)
+	assert.Contains(t, got.Desc().String(), "node_memory_Injected_total")
+}
+
+func TestMeminfoUpdateWrapsReadError(t *testing.T) {
+	// A procfs directory that exists but has no meminfo file: construction
+	// succeeds, collection fails. The error must be wrapped with context so an
+	// operator can tell which collector failed.
+	procDir := t.TempDir()
+	c, err := newMeminfoCollector(quietLogger(), Paths{ProcFS: procDir}.withDefaults())
+	require.NoError(t, err)
+
+	err = c.Update(make(chan prometheus.Metric, 4))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "couldn't get meminfo")
+	assert.Contains(t, err.Error(), "failed to get memory info")
+}

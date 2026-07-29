@@ -42,6 +42,12 @@ func init() {
 type meminfoCollector struct {
 	fs     procfs.FS
 	logger *slog.Logger
+	// fields maps metric-name suffixes to procfs values. Injectable so tests can
+	// reach the counter branch: no current upstream meminfo field has a "_total"
+	// suffix, so that branch is unreachable with the real table. The branch is kept
+	// because it is upstream's rule, and a future procfs field named *_total would
+	// otherwise be silently typed as a gauge, breaking rate() on it.
+	fields func(*procfs.Meminfo) map[string]*uint64
 }
 
 func newMeminfoCollector(logger *slog.Logger, paths Paths) (Collector, error) {
@@ -49,7 +55,7 @@ func newMeminfoCollector(logger *slog.Logger, paths Paths) (Collector, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open procfs at %s: %w", paths.ProcFS, err)
 	}
-	return &meminfoCollector{fs: fs, logger: logger}, nil
+	return &meminfoCollector{fs: fs, logger: logger, fields: meminfoFields}, nil
 }
 
 func (c *meminfoCollector) Update(ch chan<- prometheus.Metric) error {
@@ -90,7 +96,7 @@ func (c *meminfoCollector) memInfo() (map[string]float64, error) {
 	}
 
 	out := make(map[string]float64, 64)
-	for key, ptr := range meminfoFields(&mi) {
+	for key, ptr := range c.fields(&mi) {
 		if ptr != nil {
 			out[key] = float64(*ptr)
 		}
