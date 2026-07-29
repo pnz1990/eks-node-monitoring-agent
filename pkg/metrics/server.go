@@ -198,6 +198,16 @@ func newServer(logger *slog.Logger, opts Options, resolve resolveFunc, newCollec
 func NewNativeServer(logger *slog.Logger, opts Options) (*Server, error) {
 	opts = opts.withDefaults()
 
+	// Same construction-time address check as newServer. This was MISSED when F-K4-1's
+	// fix was cherry-picked from the dependency branch -- the hunk did not apply here
+	// because this function's body differs -- and a native-specific test caught it.
+	// Without it a malformed address would silently disable the endpoint on the native
+	// implementation while failing loudly on the other, so the same values.yaml typo
+	// would behave differently depending on which implementation was selected.
+	if err := validateAddress(opts.Address); err != nil {
+		return nil, err
+	}
+
 	set, err := hostmetrics.New(logger, hostmetrics.Config{
 		Paths:   hostmetrics.ForHostRoot(opts.HostRoot),
 		Include: opts.Collectors,

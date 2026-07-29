@@ -24,7 +24,9 @@ package metrics_test
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -278,4 +280,41 @@ func TestNativeServerHasSameHandlerObservability(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	assert.Contains(t, buf.String(), "nma_test_broken_metric",
 		"the native server must log gather errors too, via the shared handler")
+}
+
+// --- F-K4-1 on the NATIVE path ----------------------------------------------
+
+func TestNativeServerPortConflictDegradesRatherThanPanicking(t *testing.T) {
+	// F-K4-1 was found on Karpenter nodes and fixed in the shared Start(), so both
+	// implementations inherit it. This asserts it for NewNativeServer explicitly
+	// rather than by inheritance, because the native path builds 39 collectors at
+	// construction and a future refactor could plausibly give it its own Start.
+	//
+	// The consequence being guarded is not "metrics are missing" but "the process
+	// that publishes NodeConditions dies", which on Karpenter means a node with no
+	// health signal that gets forcefully replaced 30 minutes later.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	srv, err := metrics.NewNativeServer(testLogger(), metrics.Options{
+		Address:  ln.Addr().String(),
+		HostRoot: "/",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, srv.Start(context.Background()),
+		"the native server must degrade on a port conflict, not end the agent")
+}
+
+func TestNativeServerRejectsAMalformedAddress(t *testing.T) {
+	// The other half of the split: malformed config still fails loudly, and it must
+	// do so on the native path too. Without this, a typo in values.yaml would
+	// silently disable the endpoint on one implementation and not the other.
+	_, err := metrics.NewNativeServer(testLogger(), metrics.Options{
+		Address:  "not-an-address",
+		HostRoot: "/",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid metrics address")
 }
