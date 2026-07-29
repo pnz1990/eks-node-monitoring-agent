@@ -1327,3 +1327,101 @@ collector that legitimately reports `success=0` on EKS, so matching that means i
 emptily.
 
 ---
+## N3 — hardware group part 2: `dmi`, `nvme`, `selinux` (the three that DO emit on EKS)
+
+Unlike the rest of the hardware group, these produce real data on an EC2 instance, and all three now
+match the cluster golden exactly: `nvme` **6/6**, `selinux` **3/3**, `dmi` **1/1**.
+
+### `dmi` has a HOST-DEPENDENT label set, and that must not be "fixed"
+
+Upstream builds the descriptor's label list **at construction** from whichever DMI fields the platform
+exposes, omitting the nil ones. On the live EKS node that yields **16 of 20**:
+
+```
+present (16): bios_date bios_release bios_vendor bios_version board_asset_tag board_name
+              board_vendor board_version chassis_asset_tag chassis_vendor chassis_version
+              product_family product_name product_sku product_version system_vendor
+absent  (4):  board_serial chassis_serial product_serial product_uuid
+```
+
+The four absentees are mode-0400 sysfs files — root-readable only, and the agent does not run as root for
+these reads. So **`node_dmi_info` is literally a different metric on different hosts.** That is unusual
+enough to look like a bug, and the tempting "fix" is to always emit all 20 with empty strings for the
+missing ones. Doing that would change the series identity on every node and break any query joining on
+it. Preserved exactly, with the EKS 16/20 case reproduced as a fixture.
+
+**A distinction that is easy to collapse:** a field that *exists but is empty* (`board_name` on EC2) still
+gets its label, with an empty value. Only a **nil pointer** — an unreadable file — omits the label.
+Conflating "empty" with "absent" would silently drop labels on real hosts. Both asserted.
+
+**One deliberate improvement over upstream:** upstream ranges over a Go **map** to build the label list,
+so its `Desc` label order varies between process starts. Harmless for series identity (Prometheus sorts
+labels) but it makes a golden corpus non-diffable. Sorted here, and asserted stable across repeated
+construction.
+
+**Error handling that must distinguish three cases, not two:**
+- directory **absent** (ENOENT) → construct with an empty struct, `Update` returns `ErrNoData`. Most ARM
+  boards have no DMI, and failing construction would stop the whole agent over absent firmware tables.
+- directory **unreadable** (EACCES) or **not a directory** (ENOTDIR) → construction **fails**. Something
+  is wrong, and silently reporting a node with no firmware information would hide it.
+- **no fields at all** → `ErrNoData`, which is upstream's behaviour and is right: a `dmi_info` with zero
+  labels is a bare `1` carrying no information.
+
+Also: DMI strings come from firmware and are **not guaranteed valid UTF-8**, while the Prometheus text
+format requires it. An invalid byte would make the whole exposition unparseable, not just this metric, so
+upstream substitutes U+FFFD. Kept and asserted.
+
+### `nvme` — EBS presents as NVMe, so this is live data on EKS
+
+`node_nvme_info`'s six labels are emitted **positionally**, and `cntlid` is **last** in the descriptor
+even though it sorts first alphabetically. A transposition yields a metric with the right name and label
+keys and wrong values, so each label is asserted against a distinguishable value.
+
+Verified mechanically against upstream: **6/6 identical on name + help text + label set.**
+
+### `selinux` — the modes are a three-state enum
+
+`config_mode` and `current_mode` are `-1` disabled / `0` permissive / `1` enforcing, which is why they are
+gauges rather than booleans. When SELinux is **disabled** only `enabled=0` is emitted: emitting `0` for
+the two modes would read as *"permissive"* — a specific claim rather than an absence. Asserted, including
+that `-1` is not clamped.
+
+Scope note recorded: `go-selinux` reads `/sys/fs/selinux` directly with no configurable root, so this
+collector ignores `Paths`. Correct in the shipped DaemonSet (host `/sys` is mounted) but it is the
+**second** collector after `uname` that a rebased path would not fix.
+
+### A test-helper bug of mine that read as a collector failure
+
+Four nvme assertions failed with `expected 1073741824, actual 0` — which looks like the collector
+dropping values. It was my `gatherAllLabels` helper calling `pb.GetCounter().GetValue()` unconditionally;
+that returns **0 for a gauge**, and every nvme metric is a gauge. Diagnosed by dumping the actual emitted
+metrics rather than reading the collector, which showed all six values correct.
+
+**A test helper that silently returns 0 for an entire metric type is worse than one that panics** — it
+reads as a real failure and sends you looking in the wrong place. Fixed to check `pb.Counter != nil`
+first, and the reason is written into the helper's doc comment so it does not regress.
+
+### Live validation — 30 collectors
+
+```
+cpu 320  softnet 224  netclass 150  netdev 128  schedstat 96  thermal_zone 64  filesystem 63
+meminfo 49  netstat 42  sockstat 20  diskstats 18  timex 17  conntrack 10  time 7  vmstat 7
+nvme 6  stat 6  pressure 5  udp_queues 4  os 3  selinux 3  loadavg 3  arp 2  entropy 2
+filefd 2  dmi 1  uname 1  cpufreq 0  edac 0  kernel_hung 0(nodata)
+TOTAL 30 collectors, 1253 series, 29 success + 1 nodata
+```
+
+`go mod tidy` promoted `go-envparse` and `opencontainers/selinux` from indirect to direct — **no new
+modules**; both were already in the graph via the dependency branch.
+
+**Gates:** coverage 100.0% · race clean · vet clean · staticcheck clean · no-dependency gate PASS ·
+413 tests (was 388) · `.covignore` untouched.
+
+**Progress: 30 of 39.**
+
+**Next:** `xfs` (40 metrics on the live node — the largest remaining), then `btrfs`, `mdadm`,
+`powersupplyclass`, `watchdog`, `infiniband`, `dmmultipath`, `textfile`, `hwmon`. `hwmon` is the one
+collector that legitimately reports `success=0` on EKS, so parity there means it must FAIL rather than
+succeed emptily.
+
+---

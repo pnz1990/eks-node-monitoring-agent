@@ -817,6 +817,12 @@ func gatherLabelled(t *testing.T, c Collector, labelName string) map[string]map[
 
 // gatherAllLabels keys by the full sorted label set, so a metric with the wrong
 // label CARDINALITY does not silently collide with the right one.
+//
+// Handles gauges AND counters. An earlier version read GetCounter() unconditionally,
+// which returns 0 for a gauge -- so every nvme assertion failed against a collector
+// that was in fact correct. A test helper that silently returns 0 for a whole metric
+// type is worse than one that panics: it reads as a real failure and sends you
+// looking in the wrong place.
 func gatherAllLabels(t *testing.T, c Collector) map[string]map[string]float64 {
 	t.Helper()
 
@@ -839,7 +845,11 @@ func gatherAllLabels(t *testing.T, c Collector) map[string]map[string]float64 {
 		if out[name] == nil {
 			out[name] = map[string]float64{}
 		}
-		out[name][strings.Join(parts, ",")] = pb.GetCounter().GetValue()
+		value := pb.GetGauge().GetValue()
+		if pb.Counter != nil {
+			value = pb.GetCounter().GetValue()
+		}
+		out[name][strings.Join(parts, ",")] = value
 	}
 	return out
 }
