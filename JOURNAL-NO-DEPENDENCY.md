@@ -2067,3 +2067,132 @@ no-dependency gate PASS · 565 tests · `.covignore` untouched · 5 upstream def
 against the reference endpoint on a live cluster.
 
 ---
+
+# SESSION 2026-07-29 (afternoon) — full re-validation at scale, Q3/Q8/Q9 closed
+
+Ran everything again on a 6-node cluster with authorisation to create nodes. Four defects
+found, three of them mine. **The two most valuable results were a retraction and a
+reproduction.**
+
+## What was asked, and what came back
+
+| | asked | result |
+|---|---|---|
+| **Q3** scale-test native | does it hold at ~2,888 pods? | **yes** — peak 2,938 pods, 0 panics / 0 timeouts / 0 restarts |
+| **Q8** the latency floor | find and fix it | **retracted** — no floor existed; the harness was wrong |
+| **Q9** InstrumentMetricHandler | adopt it? | **adopted** — and it exposed two live defects |
+
+## Q8 — F-N7-1 was my measurement error (`2dee53a`)
+
+`node_scrape_collector_duration_seconds` measures **wall** time; collectors run
+**concurrently**. With fewer cores than collectors, each timer runs while its goroutine is
+descheduled, so all report roughly the *same batch window*. `stress.sh` **summed** them,
+multiplying cost by up to N.
+
+The tell was in a distribution I had already published and misread: at GOMAXPROCS=1 the
+spread across 49 collectors is **1.09×**. `netclass` walks every interface, `loadavg` reads
+one file — they cannot take the same time. One window, reported 49 times.
+
+- serial through the same wrapper: **0.0166s** for all 49, vs **0.9114s** reported → ~55×
+- wall time near-identical: **0.0121s dep vs 0.0110s native**; 1.22× by median; **0.66×** live
+- buffering the relay — the mechanism I credited with ~4× — changed nothing → **reverted**
+
+**Two hypotheses tested and rejected.** CPU throttling is *real* (nma-dep 5124 periods /
+337.9s at the chart default `cpu: 250m`; pne unlimited, never throttled) but raising the limit
+8× moved the median 7.72ms → 8.06ms. Real finding, wrong cause → **Q10**.
+
+**Lesson:** I recorded ~250× as "unexplained" and left it. Unexplained was the signal. A
+number I cannot explain is more likely to be a measurement artefact than a real effect, and
+the cheap check — *does wall time agree?* — would have settled it immediately.
+
+## Q9 — adopting it exposed a defect on every scrape (`bd9e7cb`)
+
+`newHandler` built a handler with `Registry: registry`, then *reassigned* with
+`Registry: exporterRegistry`. Both registrations happened, so
+`promhttp_metric_handler_errors_total` lived in **both** registries and
+`Gatherers{exporter, main}` collected it twice → gather failure **every scrape**.
+
+```
+nma-dep    3182 gathering errors (13h uptime)   +1 per scrape, verified over 3 scrapes
+nma-nodep     9
+pne           0
+```
+
+Every scrape of both agents served a **partial response**. Nothing logged it, because
+`ErrorLog` was nil — upstream sets it on both paths and the port dropped it. **A counter that
+records a fault plus a log that never mentions it is the worst of both.**
+
+Now 0, verified live. Fixed by using upstream's `if/else`: only one handler is ever built.
+**The assign-then-reassign version reads as equivalent to upstream's and is not.**
+
+**This lived in a known blind spot.** T1/T2/T3 compare names, success values, counts — not
+*values*. The name was present and the count was right. Recorded in the harness header rather
+than left implicit.
+
+## Q3 — and upstream #1915 reproduced in the field (`8b26d38`)
+
+At 2,434 pods, **pne's `netclass` failed (`success=0`) while both agents held (`=1`)** — same
+node, same scrape pass. pne's failing set 10 → 11. `netdev` unaffected, which corroborates:
+netlink backend, no per-device sysfs reads.
+
+**The earlier 2,888-pod run did not reproduce this**, and that negative was recorded plainly
+as "PR1 — did not reproduce". Both runs are kept visible: reachability established, **rate
+unknown** (1 of 11 samples).
+
+**Second finding:** pne restarted **8 times**; both agents **0**. Not OOM
+(`MemoryPressure=False`) — it failed its own 1s liveness probe. Mechanism measured: pne's
+`node_filesystem_readonly` tracks pod churn (64/23/49 series) while the agents stay at **4**.
+Same node, same instant: pne **0.422s**, nma-dep **0.089s**, nma-nodep **0.093s**.
+
+So the mount exclusion is an **availability** property, not just cardinality hygiene.
+**Qualified:** the agents probe `/healthz` on :8002, pne probes `/` on the metrics port — so
+part of the immunity is probe design. The 4.7× is the exclusion; the 0-vs-8 restarts is that
+*plus* the probe not sharing the path. Claiming the restarts purely for the collectors would
+overstate it.
+
+## Four harness bugs, all the same family (`3536fca`, `d790288`)
+
+Every one reported a clean result precisely when it did not run:
+
+1. **A pressure run with no pressure applied, that passed.** The manifests need
+   `nodeSelector: pressure=true`; the 4 new nodes had no label, so every churn pod was
+   `Unschedulable`. `kubectl apply` succeeded, and the "did the pod count rise?" guard was
+   *satisfied* because the cpu-saturation DaemonSet tolerates everything. Now the Jobs are
+   verified by their own `.status`, and the label is ensured up front.
+2. **`items[0]` node selection**, fine at 2 nodes, wrong at 6: a stray release holds
+   `hostPort 9100`, so "pne" could have been a different exporter. Both scripts now require a
+   node running all three.
+3. **Wall-time capture silently broken** — `$p` never expanded inside curl's single-quoted
+   `-w`, so every marker read `===WALL $p …` and every lookup missed. Caught *only* because
+   the new guard fails on a missing measurement.
+4. **A one-sided threshold**: the DEBUG check could only flag native being chattier, so
+   nma-dep logging **25×** more passed in silence.
+
+## A pre-existing flake, fixed with a validated control (`060d82e`)
+
+`TestManager_Notification` gave a **1ms** deadline to work crossing two goroutines and a
+channel. Verified against `e87fefe` — not a regression. Raised to 5s.
+
+Negative control: stubbing `Notify` makes it fail in **5.013s**. **And I checked the control
+compiled** — my first attempt produced a syntax error, and a "FAIL" that is really a build
+failure proves nothing. Same trap as the `grep -c '^--- FAIL'` incident, caught faster.
+
+## Final state
+
+```
+tests            35/35 packages, race clean, twice consecutively
+hostmetrics      100.0% coverage, 565 tests + 88 subtests, 0 skips
+vet              clean            no-dependency gate  PASS (self-test passes)
+compare.sh       346/346 families identical across all three; 3/3 self-tests detected
+compare-logs     0 errors, 0 panics, 0 restarts; impl confirmed both ways
+stress.sh        wall pne 0.0132s / dep 0.0157s / nodep 0.0103s -- within ~1.5x
+Q3 scale         2,938 pods peak, 3,000 churn completions, agents 0 restarts
+```
+
+**Parity is now stronger than at N8:** `promhttp_metric_handler_requests_*` is no longer
+*excluded* from T1 — it is compared, and it matches.
+
+**Open:** Q4 (file #1915 upstream — needs a go-ahead, public post), Q6 (split the clean PR),
+Q10 (the `cpu: 250m` default + unmanaged `GOMAXPROCS`), Q5 (resource envelope).
+
+---
