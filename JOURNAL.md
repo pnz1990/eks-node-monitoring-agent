@@ -559,3 +559,50 @@ permitting a measured exception.
 LOW bugs, then P3 scale/pressure testing.
 
 ---
+## [2026-07-29T02:10Z] P2 complete — all 12 upstream bugs dispositioned
+
+**Phase:** P2 triage
+**Status:** confirmed (all 12 have a written disposition; zero left unknown)
+
+**What I did:** Compared `node_scrape_collector_success` per collector between the two live endpoints on
+the same node, which settles applicability empirically rather than by reading issue text.
+
+**What I observed** — for every LOW bug, both exporters behave *identically*:
+```
+nfsd   NMA success=0   PNE success=0     (no NFS server on an EKS node)
+nfs    NMA success=0   PNE success=0     (no NFS client mounts)
+zfs    NMA success=0   PNE success=0     (no ZFS)
+mdadm  NMA success=1   PNE success=1     (no software RAID; succeeds trivially)
+```
+Identical values mean no fork-specific exposure: whatever upstream does here, we do the same.
+
+### Final disposition of all 12 open bugs
+
+| Issue | Collector | Disposition | Evidence |
+|---|---|---|---|
+| #1841 | netclass/bonding | **Contained by R2** (per-collector timeout). Optional mitigation documented; rejected as a default because it costs `node_network_speed_bytes`. | timeout test; parity measurement 297 vs 298 |
+| #1915 | netclass | **Contained by R2**; root cause reproduced deterministically. Real fix (skip failed device, keep the rest) belongs upstream. | `/tmp/netclassrepro` — 0 of 3 devices reported |
+| #1710 | cpufreq | **REFUTED for EKS.** cpufreq succeeds in 0.13ms and emits zero frequency metrics on *both* exporters; EC2 does not expose cpufreq sysfs, so the vulnerable `ParseUint` path is never reached. | `success=1`, 0 `node_cpu_scaling_*` series on both |
+| #1672 | filesystem | **REFUTED on our nodes.** Zero impossible values (free/avail > size) across all filesystems on both exporters. | scripted check over both scrapes: 0 violations |
+| #2514 | filesystem | **N/A** — needs NFS mounts; `nfs` collector fails on both. | success=0 both |
+| #3500 | mdadm | **N/A** — needs software RAID; collector succeeds trivially on both. Note the real fix landed in procfs (#786), not node_exporter. | success=1 both |
+| #2799 | nfsd | **N/A** — no NFS server; fails identically on both, including on kernel **6.18** (far newer than the 6.6-rc1 in the report, so no regression for us). | success=0 both |
+| #1498 | filesystem/ZFS | **N/A** — no ZFS on EKS AMIs. | zfs success=0 both |
+| #2906 | cpu | **N/A** — Darwin/M3 only. | Linux-only deployment |
+| #2217 | — | **N/A** — macOS code signing. | Linux-only |
+| #1844 | wifi | **N/A** — default-disabled upstream and for us. | absent from both enabled sets |
+| #1007 | supervisord | **N/A by default, and now contained.** Default-disabled, but it is a *panic*, so R1 makes the opt-in path safe rather than fatal. | panic containment test |
+
+**Score against prediction PR5** ("≥3 of the 12 are non-reproducible on our config"): **confirmed** —
+2 actively refuted (#1710, #1672) and 8 not applicable, so 10 of 12 do not affect us. The two that do
+are contained rather than fixed, which is the correct outcome: their real fixes belong upstream, and R2
+means we do not have to wait for them.
+
+**Honest note on what this triage does and does not show.** It is based on an *idle 20-pod cluster*.
+#1841/#1915 are churn-driven, so "contained by R2" is a claim about the guard, not evidence that the
+bugs never fire here. P3 pressure testing is what would actually exercise them, and until that runs
+this remains a design argument rather than a measurement.
+
+**Next:** P3 — scale the cluster and apply pressure. Requires cost approval first (personal account).
+
+---
