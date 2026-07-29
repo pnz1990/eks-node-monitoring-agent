@@ -18,11 +18,14 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-logr/logr v1.4.4
 	github.com/google/uuid v1.6.0
+	github.com/jsimonetti/rtnetlink/v2 v2.2.0
+	github.com/mdlayher/netlink v1.11.2
 	github.com/moby/sys/mountinfo v0.7.2
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/common v0.70.1
 	github.com/prometheus/node_exporter v1.12.1
+	github.com/prometheus/procfs v0.21.1
 	github.com/shirou/gopsutil/v4 v4.26.6
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
@@ -104,14 +107,12 @@ require (
 	github.com/hashicorp/go-envparse v0.1.0 // indirect
 	github.com/hodgesds/perf-utils v0.7.0 // indirect
 	github.com/illumos/go-kstat v0.0.0-20210513183136-173c9b0a9973 // indirect
-	github.com/jsimonetti/rtnetlink/v2 v2.2.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/lufia/iostat v1.2.1 // indirect
 	github.com/lufia/plan9stats v0.0.0-20260216142805-b3301c5f2a88 // indirect
 	github.com/mattn/go-xmlrpc v0.0.3 // indirect
 	github.com/mdlayher/ethtool v0.6.1 // indirect
 	github.com/mdlayher/genetlink v1.4.0 // indirect
-	github.com/mdlayher/netlink v1.11.2 // indirect
 	github.com/mdlayher/socket v0.6.1 // indirect
 	github.com/mdlayher/wifi v0.8.0 // indirect
 	github.com/moby/spdystream v0.5.1 // indirect
@@ -124,7 +125,6 @@ require (
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/prometheus-community/go-runit v0.1.0 // indirect
-	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/safchain/ethtool v0.7.0 // indirect
 	github.com/samber/lo v1.53.0 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect

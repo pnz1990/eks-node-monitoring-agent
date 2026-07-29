@@ -795,3 +795,144 @@ SET(12)  total 1014 series  0 errors  0 nodata
 **Next:** `sockstat`, `arp`, `conntrack` to finish the `/proc/net` group.
 
 ---
+## N3 — finishing `/proc/net`: `sockstat`, `arp`, `conntrack` — plus the N4 gate
+
+### `sockstat`: the page-size trap
+
+`/proc/net/sockstat` reports the `mem` field in **pages**, and upstream additionally exposes it
+multiplied by the page size as `node_sockstat_TCP_mem_bytes`. Hardcoding 4096 would be correct on x86_64
+and **16x wrong on an arm64 kernel with 64K pages**. Graviton nodes are common on EKS, so this is not
+theoretical. `os.Getpagesize()` is load-bearing.
+
+The test asserts against `os.Getpagesize()` rather than against `4096` — deliberately. Writing 4096
+would make the test *agree with the bug* on this host and fail legitimately on a 64K-page host. There is
+also a separate assertion on the constructor, because a literal assigned to `c.pageSize` would pass the
+arithmetic test on x86_64 and only fail on hardware nobody runs CI on.
+
+One inconsistency preserved rather than "fixed": when both address families are absent, `sockstat`
+returns `nil` while `udp_queues` returns `ErrNoData`. That is upstream's behaviour in both cases and the
+two genuinely differ. Asserted in a test so the difference reads as deliberate rather than as a port
+error.
+
+### `arp`: a claim of mine that did not survive checking
+
+I wrote a confident comment that `/proc/net/arp` truncates device names at 15 characters, so on EKS the
+procfs backend could **merge two CNI interfaces into one label** and silently sum their counts — and
+that this was why netlink is the default. It sounded right and it was wrong. Checked instead of shipped:
+
+```
+kernel IFNAMSIZ            = 16 (15 usable) -- a longer name CANNOT EXIST
+procfs parseARPEntry       uses strings.Fields -> whitespace split, not fixed columns
+longest name, live corpus  = 14 chars (eni51bec58f2f1)
+```
+
+There is no truncation and no collision hazard. Comment rewritten to state only what is verified, and
+the corrected claim is now itself a test (`TestARPLongCNIDeviceNamesAreNotTruncated`) because it is what
+justifies either backend being safe.
+
+**What IS load-bearing, and now measured rather than asserted:** the `NUD_NOARP` filter. Netlink returns
+those entries (permanent ones needing no ARP resolution) and `/proc/net/arp` omits them. Measured with a
+standalone rtnetlink program on this host:
+
+```
+3 IPv4 neighbours returned, of which 1 is NUD_NOARP
+```
+
+So without the filter netlink reports 3 where procfs reports 2 — a 50% overcount for identical kernel
+state. A metric whose value depends on which backend an operator selected is not alertable. Negative
+control: removing the filter fails 2 tests.
+
+**A fifth instance of my own recurring test bug — caught this time by coverage, not by a failure.** My
+first `NUD_NOARP` test reimplemented the filter inline in the test body and compared it to itself. It
+passed, and it would have passed against a completely broken collector. Coverage exposed it: the real
+`arpEntriesViaNetlink` sat at 80%, which is what made me look. Rewritten to call the actual
+`arpEntriesFromNeighbours`. **Fifth time now** — file doc comment instead of code; no-match case of a
+match-only bug; `multicast_total` as a substring; a regexp matching the flag name; and now a test
+mirroring the logic it was meant to check.
+
+**A real defect found while making those branches reachable.** Splitting the socket wrapper out to test
+the error paths surfaced that the query-failure path had to close the connection itself — nothing else
+would, since the success path hands the caller a closer. Left unclosed, the collector leaks one netlink
+socket **per scrape**; at a 15s interval that exhausts the fd limit within hours and would present as an
+unrelated failure long after the cause. `TestARPNetlinkQueryFailureClosesTheConnection` pins it. The fake
+connection also rejects any family other than `AF_INET`, so a change to `AF_UNSPEC` fails there rather
+than silently doubling counts on a dual-stack node.
+
+### `conntrack`: the most operationally important collector in this set
+
+`node_nf_conntrack_entries` against `node_nf_conntrack_entries_limit` is **the** signal for conntrack
+table exhaustion, which on a Kubernetes node presents as random connection failures and DNS timeouts
+rather than as anything resembling a network problem. kube-proxy in iptables mode creates an entry per
+connection, so a node running hundreds of pods approaches `nf_conntrack_max` under ordinary traffic. The
+test asserts the two values come from the *right files* — swapping them inverts the ratio and makes an
+exhausted table look empty.
+
+Two things that would be invisible without explicit tests:
+- **Empty subsystem.** These are `node_nf_conntrack_*`, not `node_conntrack_nf_conntrack_*`. Verified
+  against the live corpus. Same trap as `stat`'s `node_intr_total`.
+- **Per-CPU summation.** `/proc/net/stat/nf_conntrack` has one row per CPU — **32 rows on this host**.
+  Reporting one row would silently report one CPU's share and understate drops. Each of the 8 fields is
+  asserted against a distinct sum, plus a test that no two descriptors read the same struct field (which
+  would leave both metrics present and plausible).
+
+`readUintFromFile` returns the missing-file error **unwrapped**, and there is a test for that specific
+property: `handleErr` keys on `errors.Is(err, os.ErrNotExist)`, so a future refactor using `%v` instead
+of `%w` would turn "module not loaded" into a reported scrape failure. Also asserted that garbage
+content is *not* mistakable for an absent file.
+
+Everything is a gauge, including `stat_drop` and `stat_early_drop`, which **are** monotonic kernel
+counters. That is arguably wrong upstream — `rate()` over them is unsupported by the type even though the
+data would support it — but changing it breaks the contract. Preserved, and recorded in
+`docs/parity-exceptions-nodep.md` rather than silently improved.
+
+### N4 gate — and why the goal file's version of it was wrong
+
+The goal file specified:
+```bash
+grep -rn "prometheus/node_exporter" --include="*.go" --include=go.mod . && exit 1
+```
+That gate **fails on this branch, correctly**. `pkg/metrics` — the dependency-based approach — is still
+here *on purpose*, because N5/N6 deploy all three variants side by side and compare them. Deleting it to
+make the grep pass would destroy the thing being measured.
+
+So the claim is scoped to the package that makes it, in `hack/no-dependency-gate.sh`, checking the
+**transitive import closure** rather than grepping source. That is stronger in both directions: a grep
+cannot see an import arriving through an intermediate package, and it cannot tell an import from an
+attribution comment.
+
+```
+pkg/hostmetrics transitive node_exporter packages : 0
+pkg/hostmetrics declared imports                  : 0
+pkg/hostmetrics source references                 : 2 (both prose attribution in a doc comment)
+PASS
+```
+
+**The gate has a `--self-test` that runs it against `pkg/metrics`, which is known-dependent, and fails if
+it reports clean.** A gate that cannot fail proves nothing:
+```
+pkg/metrics transitive node_exporter packages: 2
+SELF-TEST PASSED: gate correctly detects a real dependency
+```
+
+`go mod tidy` moved `rtnetlink`, `mdlayher/netlink` and `procfs` from indirect to direct — **no new
+modules added**, they were already in the graph.
+
+### Live validation — 15 collectors on a real host
+
+```
+cpu 320  softnet 224  netclass 150  netdev 128  filesystem 63  meminfo 49
+netstat 42  sockstat 20  diskstats 18  conntrack 10  vmstat 7  stat 6  udp_queues 4  loadavg 3  arp 2
+TOTAL 15 collectors, 1046 series, 0 errors, 0 nodata
+```
+Two independent cross-checks against the cluster PNE golden corpus: conntrack **10/10 families**,
+sockstat **20/20 series**.
+
+**Gates:** coverage 100.0% · race clean · vet clean · staticcheck clean · no-dependency gate PASS with a
+passing self-test · 250 tests (was 186) · `.covignore` untouched.
+
+**Progress: 15 of 39.** The `/proc/net` group is complete.
+
+**Next:** the small `/proc` collectors — `uname`, `os`, `time`, `timex`, `pressure`, `schedstat`,
+`entropy`, `filefd`.
+
+---
