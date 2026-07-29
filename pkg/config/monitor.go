@@ -51,6 +51,43 @@ type MetricsSettings struct {
 	ExtraArgs []string `yaml:"extraArgs,omitempty" json:"extraArgs,omitempty"`
 	// IncludeExporterMetrics adds go_* and process_* metrics for the agent.
 	IncludeExporterMetrics *bool `yaml:"includeExporterMetrics,omitempty" json:"includeExporterMetrics,omitempty"`
+	// Implementation selects which collector source serves the endpoint.
+	//
+	// This exists so ONE binary can serve either implementation, which is what makes
+	// the three-way comparison possible: pne on :9100, this agent with
+	// implementation=upstream on :9101, and the same agent with
+	// implementation=native on :9102. Comparing two separate binaries would confound
+	// the collector difference with every other build difference.
+	//
+	// It is NOT intended to survive as a permanent public option -- whichever
+	// implementation wins should become the only one. Recorded in the design doc as a
+	// decision to revisit before contributing upstream.
+	//
+	//   "upstream" (default) -- pkg/metrics, which depends on prometheus/node_exporter
+	//   "native"             -- pkg/hostmetrics, with no upstream dependency
+	Implementation string `yaml:"implementation,omitempty" json:"implementation,omitempty"`
+}
+
+// Metrics implementation names.
+const (
+	// MetricsImplementationUpstream serves via prometheus/node_exporter's collectors.
+	MetricsImplementationUpstream = "upstream"
+	// MetricsImplementationNative serves via the vendored collectors in
+	// pkg/hostmetrics, with no dependency on prometheus/node_exporter.
+	MetricsImplementationNative = "native"
+)
+
+// GetImplementation returns the configured implementation, defaulting to upstream.
+//
+// Defaulting to upstream rather than native is deliberate for now: it is the variant
+// with a completed parity run behind it (298/298 against v1.12.1), so an operator who
+// enables metrics without naming an implementation gets the proven one. That default
+// flips if and when the native variant's three-way comparison says it should.
+func (ms *MetricsSettings) GetImplementation() string {
+	if ms == nil || ms.Implementation == "" {
+		return MetricsImplementationUpstream
+	}
+	return ms.Implementation
 }
 
 // IsEnabled reports whether the metrics endpoint is enabled.

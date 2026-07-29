@@ -378,14 +378,37 @@ func run() error {
 		logger.Info("initializing node_exporter compatible metrics endpoint",
 			"address", metricsSettings.Address,
 			"collectors", metricsSettings.Collectors,
+			"implementation", metricsSettings.GetImplementation(),
 		)
-		metricsServer, err := metrics.NewServer(newSlogLogger(verbosity), metrics.Options{
+		metricsOptions := metrics.Options{
 			Address:                metricsSettings.Address,
 			Collectors:             metricsSettings.Collectors,
 			UpstreamArgs:           metricsSettings.ExtraArgs,
 			IncludeExporterMetrics: metricsSettings.IncludeExporterMetrics != nil && *metricsSettings.IncludeExporterMetrics,
 			HostRoot:               config.HostRoot(),
-		})
+		}
+
+		// One binary can serve either collector implementation, selected at runtime.
+		// That is what makes the three-way comparison controlled: the HTTP layer,
+		// concurrency limit and landing page are shared, so a measured difference is
+		// attributable to the collectors rather than to two different servers.
+		var (
+			metricsServer *metrics.Server
+			err           error
+		)
+		switch impl := metricsSettings.GetImplementation(); impl {
+		case config.MetricsImplementationNative:
+			logger.Info("using native collectors (no prometheus/node_exporter dependency)")
+			metricsServer, err = metrics.NewNativeServer(newSlogLogger(verbosity), metricsOptions)
+		case config.MetricsImplementationUpstream:
+			metricsServer, err = metrics.NewServer(newSlogLogger(verbosity), metricsOptions)
+		default:
+			// An unrecognised value is rejected rather than silently defaulted: an
+			// operator who misspells "native" should learn that, not quietly get the
+			// other implementation and wonder why their metrics look different.
+			return fmt.Errorf("unknown metrics implementation %q, want %q or %q",
+				impl, config.MetricsImplementationUpstream, config.MetricsImplementationNative)
+		}
 		if err != nil {
 			logger.Error(err, "failed to create metrics server")
 			return err

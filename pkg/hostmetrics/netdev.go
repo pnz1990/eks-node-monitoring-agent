@@ -22,10 +22,28 @@ package hostmetrics
 // SCOPE. --collector.netdev.address-info (node_network_address_info) defaults off
 // and is not ported. Recorded in docs/parity-exceptions-nodep.md.
 //
-// NOTE ON DEVICE FILTERING. Unlike the filesystem collector, netdev reads a single
-// file (/proc/net/dev), so it has neither the listing-then-read race nor a
-// per-device cost. No EKS-specific device exclusion is applied here, matching the
-// dependency branch's decision: excluding interfaces from netdev would shrink the
+// THE BACKEND IS NETLINK, NOT procfs, AND THAT IS A PARITY REQUIREMENT.
+//
+// Upstream's --collector.netdev.netlink defaults to TRUE, so /proc/net/dev is only the
+// fallback. The two backends do NOT expose the same field set: netlink's
+// rtnetlink.LinkStats64 carries RXNoHandler, which /proc/net/dev has no column for at
+// all. So a procfs-based port silently loses node_network_receive_nohandler_total --
+// 7 series on the live EKS node.
+//
+// I built this on procfs first, and the omission only surfaced when the two
+// implementations were diffed end to end: 304 families upstream versus 303 native, with
+// exactly that one metric missing. Every per-collector test passed, because they compare
+// my port against ITS OWN table rather than against the endpoint upstream serves. That
+// is the argument for the three-way comparison existing at all.
+//
+// legacy() applies to BOTH backends. Upstream calls it in Update, after getNetDevStats,
+// so it runs on whichever map was produced. I first assumed netlink names were already
+// final and skipped it -- the diff then showed 17 pre-legacy names appearing and 10
+// post-legacy names missing, which is exactly what skipping the transformation looks
+// like.
+//
+// NOTE ON DEVICE FILTERING. No EKS-specific device exclusion is applied here, matching
+// the dependency branch's decision: excluding interfaces from netdev would shrink the
 // device label space for no resilience benefit.
 
 import (
@@ -33,6 +51,8 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/jsimonetti/rtnetlink/v2"
+	"github.com/mdlayher/netlink"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/procfs"
 )
@@ -51,6 +71,11 @@ type netDevCollector struct {
 	// cannot be enumerated up front. Guarded because Collect runs concurrently.
 	descsMu sync.Mutex
 	descs   map[string]*prometheus.Desc
+
+	// netlinkStats is the PRIMARY backend, matching upstream's default. Injectable so
+	// the fallback path is reachable in a test, and so a sandbox without a netlink
+	// socket still exercises the collector.
+	netlinkStats func() (map[string]map[string]uint64, error)
 }
 
 func newNetDevCollector(logger *slog.Logger, paths Paths) (Collector, error) {
@@ -58,29 +83,205 @@ func newNetDevCollector(logger *slog.Logger, paths Paths) (Collector, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open procfs at %s: %w", paths.ProcFS, err)
 	}
-	return &netDevCollector{
+	c := &netDevCollector{
 		fs:     fs,
 		logger: logger,
 		descs:  map[string]*prometheus.Desc{},
-	}, nil
+	}
+	c.netlinkStats = netDevNetlinkStats
+	return c, nil
 }
 
 func (c *netDevCollector) Update(ch chan<- prometheus.Metric) error {
-	lines, err := c.fs.NetDev()
+	byDevice, err := c.stats()
 	if err != nil {
 		return fmt.Errorf("couldn't get netdev stats: %w", err)
 	}
 
-	for device, stats := range lines {
-		fields := netDevFields(&stats)
-		applyLegacyNames(fields)
-
+	for device, fields := range byDevice {
 		for key, value := range fields {
 			ch <- prometheus.MustNewConstMetric(
 				c.desc(key), prometheus.CounterValue, float64(value), device)
 		}
 	}
 	return nil
+}
+
+// stats returns per-device counters, preferring netlink as upstream does.
+//
+// A netlink failure falls back to /proc/net/dev rather than failing: the procfs path
+// yields one metric fewer (no receive_nohandler) but every other counter, which beats no
+// network metrics at all on a host where the netlink socket is unavailable.
+func (c *netDevCollector) stats() (map[string]map[string]uint64, error) {
+	byDevice, err := c.netlinkStats()
+	if err == nil {
+		return byDevice, nil
+	}
+	c.logger.Debug("netlink netdev stats unavailable, falling back to /proc/net/dev", "err", err)
+
+	lines, procErr := c.fs.NetDev()
+	if procErr != nil {
+		// Report the ORIGINAL netlink error too: "procfs failed" alone would hide that
+		// the primary backend was tried first, and why it did not work.
+		return nil, fmt.Errorf("netlink failed (%v) and procfs failed: %w", err, procErr)
+	}
+
+	byDevice = make(map[string]map[string]uint64, len(lines))
+	for device, stats := range lines {
+		fields := netDevFields(&stats)
+		applyLegacyNames(fields)
+		byDevice[device] = fields
+	}
+	return byDevice, nil
+}
+
+// netDevNetlinkStats reads per-device counters over rtnetlink.
+func netDevNetlinkStats() (map[string]map[string]uint64, error) {
+	return netDevNetlinkStatsWith(netDevLinkQuery(rtnetlink.Dial))
+}
+
+// netDevLinkQuery builds the link-list query from a dialer.
+//
+// The dial and the list are separated so BOTH failure paths are testable. *rtnetlink.Conn
+// is a concrete struct with an embedded Link service, so it cannot be faked -- hence the
+// list step takes the two operations it needs as functions rather than the connection.
+func netDevLinkQuery(dial func(*netlink.Config) (*rtnetlink.Conn, error)) func() ([]rtnetlink.LinkMessage, func(), error) {
+	return func() ([]rtnetlink.LinkMessage, func(), error) {
+		conn, err := dial(nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		return netDevListLinks(conn.Link.List, conn.Close)
+	}
+}
+
+// netDevListLinks lists links and hands back a closer, closing on failure.
+//
+// THE CLOSE-ON-ERROR IS THE POINT. On the success path the caller closes via the
+// returned func, so nothing else does; left unclosed on the error path this leaks a
+// netlink socket per scrape, and at a 15s interval that exhausts the fd limit within
+// hours. The arp collector had exactly this defect, found the same way -- by making the
+// error path reachable rather than by reading the code.
+func netDevListLinks(
+	list func() ([]rtnetlink.LinkMessage, error),
+	closeConn func() error,
+) ([]rtnetlink.LinkMessage, func(), error) {
+	links, err := list()
+	if err != nil {
+		_ = closeConn()
+		return nil, nil, err
+	}
+	return links, func() { _ = closeConn() }, nil
+}
+
+// netDevNetlinkStatsWith is the seam: it takes a function producing the link list, so
+// both error returns are reachable without a netlink socket that fails on demand.
+func netDevNetlinkStatsWith(query func() ([]rtnetlink.LinkMessage, func(), error)) (map[string]map[string]uint64, error) {
+	links, closeConn, err := query()
+	if err != nil {
+		return nil, err
+	}
+	if closeConn != nil {
+		defer closeConn()
+	}
+	return netDevStatsFromLinks(links), nil
+}
+
+// netDevStatsFromLinks maps rtnetlink link messages onto per-device counters.
+//
+// Split from the socket handling so the two skip conditions -- a link with no
+// attributes, and attributes carrying neither 32- nor 64-bit stats -- are reachable
+// without a netlink socket. Both are guards upstream also has, and both would nil-panic
+// without them; a panic in a collector is far worse than a missing device.
+func netDevStatsFromLinks(links []rtnetlink.LinkMessage) map[string]map[string]uint64 {
+	byDevice := make(map[string]map[string]uint64, len(links))
+
+	for _, msg := range links {
+		if msg.Attributes == nil {
+			continue
+		}
+		stats := msg.Attributes.Stats64
+		if stats == nil {
+			// A kernel reporting only 32-bit stats. Widened rather than skipped: the
+			// counters are still correct, just narrower.
+			if s32 := msg.Attributes.Stats; s32 != nil {
+				stats = widenNetDevStats32(s32)
+			}
+		}
+		if stats == nil {
+			continue
+		}
+
+		fields := netDevNetlinkFields(stats)
+		// The SAME transformation the procfs path gets, for the reason in the file
+		// comment above.
+		applyLegacyNames(fields)
+		byDevice[msg.Attributes.Name] = fields
+	}
+	return byDevice
+}
+
+// widenNetDevStats32 converts 32-bit link stats to the 64-bit form.
+//
+// Only the fields netDevNetlinkFields reads are converted. Any field this misses would
+// silently report 0 on such a kernel, which is why the test sets every 32-bit field to a
+// distinct non-zero value and asserts no mapped output is zero.
+func widenNetDevStats32(s *rtnetlink.LinkStats) *rtnetlink.LinkStats64 {
+	return &rtnetlink.LinkStats64{
+		RXPackets: uint64(s.RXPackets), TXPackets: uint64(s.TXPackets),
+		RXBytes: uint64(s.RXBytes), TXBytes: uint64(s.TXBytes),
+		RXErrors: uint64(s.RXErrors), TXErrors: uint64(s.TXErrors),
+		RXDropped: uint64(s.RXDropped), TXDropped: uint64(s.TXDropped),
+		Multicast: uint64(s.Multicast), Collisions: uint64(s.Collisions),
+		RXLengthErrors: uint64(s.RXLengthErrors), RXOverErrors: uint64(s.RXOverErrors),
+		RXCRCErrors: uint64(s.RXCRCErrors), RXFrameErrors: uint64(s.RXFrameErrors),
+		RXFIFOErrors: uint64(s.RXFIFOErrors), RXMissedErrors: uint64(s.RXMissedErrors),
+		TXAbortedErrors: uint64(s.TXAbortedErrors), TXCarrierErrors: uint64(s.TXCarrierErrors),
+		TXFIFOErrors: uint64(s.TXFIFOErrors), TXHeartbeatErrors: uint64(s.TXHeartbeatErrors),
+		TXWindowErrors: uint64(s.TXWindowErrors),
+		RXCompressed:   uint64(s.RXCompressed), TXCompressed: uint64(s.TXCompressed),
+		RXNoHandler: uint64(s.RXNoHandler),
+	}
+}
+
+// netDevNetlinkFields maps rtnetlink stats onto the PRE-legacy metric names.
+//
+// Upstream's map verbatim. NOTE receive_nohandler at the end: it exists ONLY here, not
+// in /proc/net/dev, which is why the procfs fallback yields one metric fewer.
+// See https://github.com/torvalds/linux/blob/master/include/uapi/linux/if_link.h
+func netDevNetlinkFields(s *rtnetlink.LinkStats64) map[string]uint64 {
+	return map[string]uint64{
+		"receive_packets":  s.RXPackets,
+		"transmit_packets": s.TXPackets,
+		"receive_bytes":    s.RXBytes,
+		"transmit_bytes":   s.TXBytes,
+		"receive_errors":   s.RXErrors,
+		"transmit_errors":  s.TXErrors,
+		"receive_dropped":  s.RXDropped,
+		"transmit_dropped": s.TXDropped,
+		"multicast":        s.Multicast,
+		"collisions":       s.Collisions,
+
+		// detailed rx_errors
+		"receive_length_errors": s.RXLengthErrors,
+		"receive_over_errors":   s.RXOverErrors,
+		"receive_crc_errors":    s.RXCRCErrors,
+		"receive_frame_errors":  s.RXFrameErrors,
+		"receive_fifo_errors":   s.RXFIFOErrors,
+		"receive_missed_errors": s.RXMissedErrors,
+
+		// detailed tx_errors
+		"transmit_aborted_errors":   s.TXAbortedErrors,
+		"transmit_carrier_errors":   s.TXCarrierErrors,
+		"transmit_fifo_errors":      s.TXFIFOErrors,
+		"transmit_heartbeat_errors": s.TXHeartbeatErrors,
+		"transmit_window_errors":    s.TXWindowErrors,
+
+		// for cslip etc
+		"receive_compressed":  s.RXCompressed,
+		"transmit_compressed": s.TXCompressed,
+		"receive_nohandler":   s.RXNoHandler,
+	}
 }
 
 // desc returns (and caches) the descriptor for a field.

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/eks-node-monitoring-agent/pkg/hostmetrics"
 	"github.com/prometheus/client_golang/prometheus"
 	promcollectors "github.com/prometheus/client_golang/prometheus/collectors"
 	versioncollector "github.com/prometheus/client_golang/prometheus/collectors/version"
@@ -136,12 +137,60 @@ func newServer(logger *slog.Logger, opts Options, resolve resolveFunc, newCollec
 		return nil, err
 	}
 
-	handler := newHandler(registry, nc, opts, logger)
+	handler := newHandler(registry, opts, logger)
 
 	return &Server{
 		opts:     opts,
 		registry: registry,
 		handler:  handler,
+		listen:   net.Listen,
+		serve:    func(s *http.Server, l net.Listener) error { return s.Serve(l) },
+		shutdown: func(s *http.Server, ctx context.Context) error { return s.Shutdown(ctx) },
+	}, nil
+}
+
+// NewNativeServer builds a metrics server backed by pkg/hostmetrics, which has no
+// dependency on prometheus/node_exporter.
+//
+// EVERYTHING BELOW THE REGISTRY IS SHARED with NewServer: the same Options, the same
+// Server type, the same newHandler, the same listen/serve/shutdown seams. Only the
+// registry's contents differ. That is deliberate and is what makes N5/N6 a controlled
+// comparison -- if the two servers differed in their HTTP layer, concurrency limit or
+// landing page, any measured difference could not be attributed to the collectors.
+//
+// The upstream flag resolution (ResolveUpstreamFlags, HostPathArgs, applyEKSDefaults)
+// is NOT called here: it is kingpin plumbing that exists only to configure upstream's
+// package-level flag state. The native implementation takes its paths as a struct
+// field instead, which is the whole point of Paths in that package.
+func NewNativeServer(logger *slog.Logger, opts Options) (*Server, error) {
+	opts = opts.withDefaults()
+
+	set, err := hostmetrics.New(logger, hostmetrics.Config{
+		Paths:   hostmetrics.ForHostRoot(opts.HostRoot),
+		Include: opts.Collectors,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to build native collector set: %w", err)
+	}
+
+	registry := prometheus.NewRegistry()
+
+	// node_exporter_build_info is part of the endpoint contract that dashboards and
+	// alerts depend on, so the native variant registers it too. Omitting it would be a
+	// parity difference that has nothing to do with collectors.
+	if err := registry.Register(versioncollector.NewCollector("node_exporter")); err != nil {
+		return nil, fmt.Errorf("failed to register version collector: %w", err)
+	}
+
+	if err := hostmetrics.NewPrometheusCollector(set, opts.CollectorTimeout, logger).
+		Register(registry); err != nil {
+		return nil, fmt.Errorf("failed to register native node collector: %w", err)
+	}
+
+	return &Server{
+		opts:     opts,
+		registry: registry,
+		handler:  newHandler(registry, opts, logger),
 		listen:   net.Listen,
 		serve:    func(s *http.Server, l net.Listener) error { return s.Serve(l) },
 		shutdown: func(s *http.Server, ctx context.Context) error { return s.Shutdown(ctx) },
@@ -177,7 +226,12 @@ func registerCollectors(reg prometheus.Registerer, nc *collector.NodeCollector, 
 
 // newHandler builds the HTTP handler tree: the metrics path, a landing page on
 // unknown paths (matching upstream behaviour), and concurrency limiting.
-func newHandler(registry *prometheus.Registry, nc *collector.NodeCollector, opts Options, logger *slog.Logger) http.Handler {
+//
+// It takes only the registry and opts -- NOT a collector. That is what lets the native
+// (no-upstream-dependency) implementation reuse this entire HTTP layer unchanged, so
+// the three-way comparison isolates the collector difference rather than confounding it
+// with two different servers. The collector parameter this used to take was never read.
+func newHandler(registry *prometheus.Registry, opts Options, logger *slog.Logger) http.Handler {
 	promHandler := promhttp.HandlerFor(
 		registry,
 		promhttp.HandlerOpts{

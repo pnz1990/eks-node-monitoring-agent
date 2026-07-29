@@ -1652,3 +1652,132 @@ metrics AND logs, N7 stress/load across all three, N8 the design doc with a reco
 two approaches.
 
 ---
+## N4 COMPLETE — dependency gate verified, and the native endpoint wired end to end
+
+### The end-to-end diff found a parity gap that 565 unit tests could not
+
+Wiring both implementations behind one binary and diffing the two `/metrics` endpoints
+immediately surfaced this:
+
+```
+families upstream=304  native=303
+ONLY-UPSTREAM (1): node_network_receive_nohandler_total
+```
+
+**Root cause: `netdev`'s default backend is NETLINK, not procfs.** Upstream's
+`--collector.netdev.netlink` defaults to `true`, and `rtnetlink.LinkStats64` carries
+`RXNoHandler`, for which `/proc/net/dev` has no column at all. My port read procfs, so it
+silently lost 7 series on the live node.
+
+**Every per-collector test passed**, because they compare my port against **its own
+table** rather than against the endpoint upstream actually serves. That is precisely the
+gap the three-way comparison exists to close, and it is the strongest argument so far for
+N5/N6 being worth the effort rather than a formality.
+
+Fixing it exposed a second error of mine in the same change. I wrote that netlink field
+names were already final and skipped `legacy()`. The re-diff:
+
+```
+ONLY-UPSTREAM (10): receive_drop receive_errs receive_fifo receive_frame
+                    receive_multicast transmit_carrier transmit_colls
+                    transmit_drop transmit_errs transmit_fifo
+ONLY-NATIVE   (17): receive_dropped receive_errors receive_fifo_errors
+                    receive_frame_errors multicast collisions ... (pre-legacy names)
+```
+
+That is exactly the signature of a skipped transformation. Upstream calls `legacy()` in
+`Update`, **after** `getNetDevStats`, so it runs on whichever backend produced the map.
+
+**After both fixes:**
+```
+families upstream=304  native=304
+ONLY-UPSTREAM: 0     ONLY-NATIVE: 0
+collectors upstream=49  native=39
+  ONLY-UPSTREAM (10): bcache bcachefs bonding fibrechannel ipvs nfs nfsd rapl tapestats zfs
+  SUCCESS-VALUE-DIFF: 0     <-- all 39 shared collectors agree on success/failure
+```
+
+The 10 are the out-of-scope collectors, and **zero** of the 39 shared ones disagree on
+`node_scrape_collector_success`.
+
+### One binary, two implementations — and why that matters for the comparison
+
+Added `metrics.implementation: upstream|native`. Everything below the registry is
+**shared**: the same `Options`, `Server`, `newHandler`, and the same listen/serve/shutdown
+seams. Only the registry contents differ.
+
+That is deliberate. Two separate binaries would confound the collector difference with
+every other build difference — and `newHandler` turned out to take a collector parameter
+it never read, so removing it made the independence provable rather than asserted.
+
+Default is `upstream`, not `native`: it is the variant with a completed parity run behind
+it (298/298 against v1.12.1), so an operator who enables metrics without naming an
+implementation gets the proven one. An unrecognised value is **rejected** rather than
+silently defaulted — someone who misspells "native" should learn that, not quietly get the
+other implementation and wonder why their metrics differ.
+
+### The resilience boundary, ported and now actually tested
+
+`pkg/hostmetrics/prometheus.go` reproduces the contract exactly:
+`node_scrape_collector_{duration_seconds,success}` plus the panic and timeout counters.
+The equivalent code on the dependency branch cost **three bugs**, all in the timeout path,
+so this file's tests are adversarial by design — a collector that panics, one that hangs,
+one that emits then panics, and one that **keeps emitting 500 metrics after being
+abandoned**. That last one is the regression test for the worst of the three: writing to a
+channel the registry has already closed panics on a goroutine where nothing can recover
+it, turning the timeout guard into a *new* crash source.
+
+**Two measured properties of the counters, both of which I first got wrong in a comment:**
+
+```
+a CounterVec with no observed labels emits NOTHING
+  -> node_collector_panics_total is ABSENT until the first panic
+the increment lands during Collect, after the registry snapshotted its collector list
+  -> it appears on the NEXT scrape, not this one (verified: gather 1 absent, gather 2 = 2)
+```
+
+Neither breaks containment — `success=0` is reported in the *same* scrape — but it does
+change what an alert should watch:
+
+```
+ALERT ON:      node_scrape_collector_success == 0      same-scrape, always present
+DIAGNOSE WITH: node_collector_panics_total             lagging, absent until first panic
+```
+
+Written down rather than left for whoever writes the alert to discover.
+
+**A test-authoring mistake of mine, caught by the lag test itself.** My first version
+asserted the counter *family* was absent on gather 1. It failed — because the counters are
+**package-level**, so an earlier test in the same binary had already created the family.
+The lag claim was right; the assertion was wrong. Now keyed on the collector's own label
+with a unique name, and verified in isolation.
+
+**And one real bug `go vet` caught:** `pb = *m` copies a `dto.Metric`, which embeds a
+`sync.Mutex`. Copying a mutex is undefined behaviour; the copy served no purpose and the
+pointer works directly.
+
+### N4 gate
+
+```
+pkg/hostmetrics transitive node_exporter packages : 0
+declared imports                                  : 0
+source references                                 : 2 (both prose attribution)
+--self-test vs known-dependent pkg/metrics        : detects 2, PASSES
+```
+
+### Live: both endpoints served locally
+
+```
+native    status=200  families=304  series=1374
+upstream  status=200  families=304  series=1402
+```
+The 28-series difference is entirely the 10 out-of-scope collectors' meta metrics
+(2 × 10 = 20) plus their own output.
+
+**Gates:** coverage 100.0% · race clean · vet clean · staticcheck clean · nodep gate PASS
+with passing self-test · 565 tests.
+
+**N3 and N4 COMPLETE.** Next: N5 deploy all three to the cluster (pne 9100, nma-dep 9101,
+nma-nodep 9102), N6 three-way validation of metrics AND logs, N7 stress/load, N8 design doc.
+
+---
