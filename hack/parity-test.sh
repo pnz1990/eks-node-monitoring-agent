@@ -85,7 +85,12 @@ wait_for_endpoint "http://127.0.0.1:${UPSTREAM_PORT}/metrics" "upstream node_exp
 
 # Sanity-check that the thing answering really is node_exporter. Without this a
 # stale unrelated process on the port produces a meaningless diff.
-if ! curl -s "http://127.0.0.1:${UPSTREAM_PORT}/metrics" | grep -q "^node_exporter_build_info"; then
+# Buffered rather than piped: `grep -q` exits on the first match, which closes the
+# pipe and kills curl with SIGPIPE. Under `set -o pipefail` that surfaces as
+# pipeline failure, so the guard would reject a healthy exporter precisely when
+# the pattern matched. Found while building the three-way harness.
+upstream_body="$(curl -s "http://127.0.0.1:${UPSTREAM_PORT}/metrics" || true)"
+if [[ "${upstream_body}" != *node_exporter_build_info* ]]; then
   echo "ERROR: the endpoint on ${UPSTREAM_PORT} does not look like node_exporter" >&2
   echo "       (node_exporter_build_info absent). Refusing to compare against it." >&2
   exit 2

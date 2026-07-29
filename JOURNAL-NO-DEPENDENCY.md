@@ -117,10 +117,10 @@ whole body and exits 0. The bug only manifests on a match.
 
 Fixed by buffering the body into a variable and using a bash pattern test instead of a pipe.
 
-**Note:** the two-way `hack/parity-test.sh` has the *same* `curl | grep -q` construct at line 88 and has
-never failed, because it runs the check before `set -o pipefail`... it does not — it has pipefail set
-too. It has simply not hit the race in practice. **Worth fixing there as well rather than leaving a
-latent inverted guard in the older harness.**
+**The same latent bug exists in the two-way harness.** `hack/parity-test.sh:88` has the identical
+`curl -s ... | grep -q` construct and also sets `pipefail`. It has not fired there yet, which is luck
+rather than correctness: whether curl has finished writing when grep exits depends on body size and
+scheduling. Fixed in both harnesses rather than left as a latent inverted guard.
 
 **Next:** N2 — the `pkg/hostmetrics/` framework with no collectors: registry, dispatch, `--path.*`,
 `ErrNoData`, meta metrics, native pflag config. Reuse `resilience.go` and `server.go` unchanged.
