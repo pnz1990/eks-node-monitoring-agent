@@ -1,7 +1,35 @@
 # GOAL — validate both forks against Karpenter without compromising NMA's original function
 
-**Status:** not started
+**Status:** K0 complete — **two assumptions in this file were wrong and are corrected below.**
+See `JOURNAL-KARPENTER.md` §K0 for the source reading.
 **Owner decision needed:** none to begin; see §10 for the cost items
+
+> ### K0 CORRECTIONS (2026-07-29), applied in place
+>
+> **1. NMA's conditions are a *named, first-class* Karpenter input.** Karpenter's Node Auto Repair
+> policy lists exactly the five NMA condition types, with toleration durations:
+> `AcceleratedHardwareReady` **10 min**; `StorageReady`, `NetworkingReady`, `KernelReady`,
+> `ContainerRuntimeReady` **30 min**. The contract is documented, not inferred.
+>
+> **2. There is a 30-minute toleration before Karpenter acts.** This **lowers H2's severity**: a
+> spurious Fatal that clears inside 30 minutes causes **no** replacement. It does not eliminate it —
+> a flapping veth holds the condition false indefinitely. Every "spurious Fatal" finding must now
+> also state **how long it persisted**, because under 30 min is a logging problem and over 30 min is
+> an availability incident.
+>
+> **3. Repair bypasses drain** — "forcefully terminate ... bypassing the standard drain and grace
+> period procedures". A false Fatal is a forced termination, not a graceful replacement.
+>
+> **4. The 20% safety valve breaks the original topology.** Karpenter skips repair when >20% of a
+> NodePool is unhealthy. With 2-node pools, one unhealthy node is 50% → **repair is suppressed and
+> the test observes nothing while appearing to pass.** Repair-loop pools must be **≥5 nodes**;
+> §4.3 is corrected.
+>
+> **5. Node Auto Repair is alpha and off by default** (Karpenter v1.1.0+, gate `NodeRepair=true`),
+> and **this cluster has no Karpenter, no Auto Mode, and `nodeRepairConfig: null`** — so the
+> `Fatal → replacement` link is currently **not wired at all**. §10's flagged assumption is
+> confirmed: everything validated to date measured *condition publication*, never *repair
+> execution*.
 **Branches under test:** `feat/prometheus-node-exporter-parity` (**dep**) · `feat/metrics-no-upstream-dependency` (**nodep**)
 **Baseline to protect:** stock NMA (`main`), unmodified
 
@@ -220,12 +248,17 @@ accelerators** (`ForkFailedOutOfPIDs`, `PodStuckTerminating`, and 6 networking o
 
 ### 4.2 Deadlines derived from the code, never guessed
 
-| Fault | Deadline | Why |
+| What is timed | Deadline | Source |
 |---|---|---|
-| `IPAMDNotReady` | **6 min** | log scan is prompt; 1 period + margin |
-| `InterfaceNotUp/NotRunning` | **12 min** | needs 2 adjacent periods (2 × 5 min) + margin |
-| `IPAMDNotRunning` | **18 min** | `ipamdNotRunningConsistencyDuration` = 15 min + margin |
-| condition clears | **2 periods** | after removing the fault |
+| `IPAMDNotReady` condition appears | **6 min** | log scan is prompt; 1 period + margin |
+| `InterfaceNotUp/NotRunning` appears | **12 min** | needs 2 adjacent periods (2 × 5 min) + margin |
+| `IPAMDNotRunning` appears | **18 min** | `ipamdNotRunningConsistencyDuration` = 15 min + margin |
+| **Karpenter terminates the node** | **30 min + launch time** | Karpenter toleration for `NetworkingReady=False` |
+| condition clears | **2 periods** | after removing the fault (`interfaceCacheTTL`) |
+
+**A single end-to-end repair test takes ~40 minutes, and that floor is set by Karpenter's
+toleration duration, not by the harness.** Budget accordingly; do not shorten it by "just checking
+the condition", which tests a different claim (K0.3).
 
 **Any harness wait shorter than these is a bug in the harness.** Record the *observed* latency,
 not just pass/fail, so A4 can be evaluated.
@@ -244,6 +277,15 @@ Replace the MNG with a Karpenter `NodePool` + `EC2NodeClass`:
 **One variant per node pool**, not per cluster: three pools (`main`, `dep`, `nodep`) with distinct
 labels and taints, so the three run under *the same* Karpenter controller and the same churn — the
 same "same-node, same-pass" discipline that made the metrics comparison trustworthy.
+
+> **CORRECTED per K0.2: pool sizing is load-bearing.** Karpenter suppresses repair when >20% of a
+> NodePool is unhealthy. A 2-node pool with one unhealthy node is at 50% → **repair never fires and
+> the test silently observes nothing.** Repair-loop pools (Tier A3/A5/A6 with `NodeRepair=true`)
+> therefore need **≥5 nodes each**; condition-publication pools (A1/A2/A4, B*) may stay at 2.
+>
+> This is itself a Tier-D-style trap: a 2-node pool would have produced "no replacement occurred"
+> and could have been misread as "no spurious repair", when the truth is the harness could not have
+> seen one either way.
 
 > **Why not one cluster per variant:** it would triple cost and make "the same churn" unprovable.
 > **Why not all three on one node:** `hostPort 9100` collides (H1), which is itself under test.
