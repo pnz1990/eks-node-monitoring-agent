@@ -231,16 +231,51 @@ func registerCollectors(reg prometheus.Registerer, nc *collector.NodeCollector, 
 // (no-upstream-dependency) implementation reuse this entire HTTP layer unchanged, so
 // the three-way comparison isolates the collector difference rather than confounding it
 // with two different servers. The collector parameter this used to take was never read.
+//
+// TWO THINGS HERE WERE FOUND BY COMPARING LIVE ENDPOINTS, not by any test.
+//
+//  1. ErrorLog WAS UNSET. `ErrorHandling: ContinueOnError` means a gather error
+//     increments promhttp_metric_handler_errors_total{cause="gathering"} and serves a
+//     partial scrape. With ErrorLog nil, client_golang counts it and says NOTHING.
+//     Measured on the live cluster: 3182 gathering errors on one agent pod with zero
+//     matching log lines, because there was nowhere for them to go. Upstream sets
+//     ErrorLog on both paths (node_exporter.go:157,172); the port dropped it. A counter
+//     that records a fault and a log that never mentions it is the worst of both --
+//     the operator sees a number rise with no way to learn what broke.
+//
+//  2. InstrumentMetricHandler WAS NOT CALLED, so promhttp_metric_handler_requests_total
+//     and _requests_in_flight were absent -- the last metric-name difference against
+//     pne (Q9). It costs 2 series per node and is what a dashboard graphs to see
+//     whether scrapes are succeeding at all. Note upstream registers these on the
+//     EXPORTER registry, so they only appear when exporter metrics are enabled; that
+//     conditional is reproduced rather than "improved", because moving them to the main
+//     registry would make them appear in a configuration where pne has none.
+//
+// AND THE CAUSE OF (1), which the fix for (2) exposed: this function used to BUILD a
+// handler with `Registry: registry` and then REASSIGN promHandler with
+// `Registry: exporterRegistry` when exporter metrics were on. `HandlerOpts.Registry`
+// registers promhttp_metric_handler_errors_total onto whatever it is given, so the
+// discarded first handler had already put that counter in the MAIN registry -- and the
+// replacement put it in the exporter registry too. Gathering
+// `Gatherers{exporterRegistry, registry}` then collected the same family from both and
+// failed with "was collected before with the same name and label values" on EVERY
+// scrape: measured +1 per scrape on the live cluster, 3182 on a 13h-old pod.
+//
+// The structure below is upstream's if/else, where only ONE handler is ever built, so
+// the counter is registered exactly once. Reproducing upstream's shape rather than
+// restructuring it is the lesson: the assign-then-reassign version reads as equivalent
+// and is not.
+//
+// SCOPE OF THAT BUG: it fired only with includeExporterMetrics: true, which is NOT the
+// chart default (charts/.../values.yaml sets false). Default deployments were unaffected;
+// our three-way test cluster enables it, which is why both agents showed it and pne --
+// a separate program using the if/else -- did not.
 func newHandler(registry *prometheus.Registry, opts Options, logger *slog.Logger) http.Handler {
-	promHandler := promhttp.HandlerFor(
-		registry,
-		promhttp.HandlerOpts{
-			ErrorHandling:       promhttp.ContinueOnError,
-			MaxRequestsInFlight: opts.MaxRequests,
-			Registry:            registry,
-		},
-	)
+	// errorLog routes client_golang's own errors into the agent's logger at ERROR.
+	// slog.NewLogLogger is the same adapter upstream uses.
+	errorLog := slog.NewLogLogger(logger.Handler(), slog.LevelError)
 
+	var promHandler http.Handler
 	if opts.IncludeExporterMetrics {
 		exporterRegistry := prometheus.NewRegistry()
 		exporterRegistry.MustRegister(
@@ -250,9 +285,26 @@ func newHandler(registry *prometheus.Registry, opts Options, logger *slog.Logger
 		promHandler = promhttp.HandlerFor(
 			prometheus.Gatherers{exporterRegistry, registry},
 			promhttp.HandlerOpts{
+				ErrorLog:            errorLog,
 				ErrorHandling:       promhttp.ContinueOnError,
 				MaxRequestsInFlight: opts.MaxRequests,
-				Registry:            exporterRegistry,
+				// exporterRegistry, NOT registry: the error counter is a self-metric, and
+				// putting it in the main registry as well is what caused the duplicate
+				// collection above.
+				Registry: exporterRegistry,
+			},
+		)
+		// Registered against exporterRegistry, matching upstream: these describe the
+		// scrape endpoint, and upstream keeps them with the other self-metrics.
+		promHandler = promhttp.InstrumentMetricHandler(exporterRegistry, promHandler)
+	} else {
+		promHandler = promhttp.HandlerFor(
+			registry,
+			promhttp.HandlerOpts{
+				ErrorLog:            errorLog,
+				ErrorHandling:       promhttp.ContinueOnError,
+				MaxRequestsInFlight: opts.MaxRequests,
+				Registry:            registry,
 			},
 		)
 	}
