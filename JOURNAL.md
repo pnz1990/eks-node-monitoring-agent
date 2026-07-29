@@ -260,3 +260,59 @@ test, R4 (liveness independence) and R5 (cardinality/OOM bound) still open.
 defaults filter no interfaces at all (`netclassIgnoredDevices` default `^$`).
 
 ---
+## [2026-07-28T23:45Z] P2: #1915/#1841 netclass — root cause found and REPRODUCED
+
+**Phase:** P2 triage
+**Status:** confirmed
+
+**What I did:** Read `node_exporter/collector/netclass_linux.go`, then built a fixture-based
+reproduction under `/tmp/netclassrepro` using the real `procfs/sysfs` package.
+
+**Root cause** — `getNetClassInfo`, `collector/netclass_linux.go`:
+```go
+for _, device := range netDevices {
+    if c.ignoredDevicesPattern.MatchString(device) { continue }
+    interfaceClass, err := c.fs.NetClassByIface(device)
+    if err != nil {
+        return netClass, err     // <-- ONE bad device aborts the WHOLE collector
+    }
+    netClass[device] = *interfaceClass
+}
+```
+The device list is enumerated first, then each device is read. A device present at listing time but
+gone at read time returns an error, and the collector returns **nothing at all** — not partial data.
+
+**Reproduction output (deterministic, not timing-dependent):**
+```
+devices listed: [eth0 veth1234 veth5678]
+simulated churn: veth5678 removed after listing
+UPSTREAM: abort on device "veth5678": open sysroot/class/net/veth5678: no such file or directory
+RESULT: 0 of 3 devices reported -> netclass emits NOTHING
+```
+
+**Why this matters far more on EKS than on a static host:** veth interfaces are created and destroyed
+on every pod schedule/teardown. The listing→read window is microseconds, but with hundreds of pods
+churning, hitting it is routine rather than rare. On a static bare-metal host, interfaces essentially
+never disappear, which is why upstream has tolerated this since 2020.
+
+This also explains #1841 (netclass → scrape timeouts): the same loop does a full sysfs read per device
+with no bound, so latency scales with interface count, which on Kubernetes scales with pod count.
+
+**Our exposure is worse than the reporters':** `netclassIgnoredDevices` defaults to `^$` (matches
+nothing), so we read **every** veth. The #1841 reporter had explicitly configured
+`^(lo|docker[0-9]|veth.+|cali\w{11}|br\-.+|tunl0)$` and *still* hit timeouts.
+
+**Disposition:** two-part, no forking of collector internals.
+1. **Mitigate by configuration** — ship an EKS-appropriate default `ignored-devices` regexp covering
+   veth/cni/br/docker interfaces. These are pod-side interface halves, not node networking; nobody
+   dashboards them, and excluding them removes both the churn race and most of the latency.
+2. **Contained by R2 already** — the per-collector timeout means even an unmitigated netclass stall
+   degrades one collector instead of hanging the scrape. This is why P1 was sequenced first.
+
+Note: the fix for the *underlying* all-or-nothing behaviour belongs upstream (skip the failed device,
+keep the rest). Worth filing, but not something to carry as a fork patch.
+
+**Next:** implement the safe default and prove it (a) removes the churn failure and (b) does not remove
+any metric a real dashboard uses.
+
+---
