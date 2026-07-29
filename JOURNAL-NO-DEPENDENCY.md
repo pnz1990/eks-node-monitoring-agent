@@ -247,3 +247,61 @@ be silently typed as a gauge, breaking `rate()` on it.
 to make the comparison meaningful.
 
 ---
+## [2026-07-29T03:50Z] N3 scoping finding — 10 of 49 collectors emit nothing on EKS
+
+**Phase:** N3
+**Status:** confirmed — changes the scope estimate materially
+
+**What I did:** Before porting `cpu` (495 lines, 8 sub-collectors, 10 metric families), checked what it
+actually emits on a live EKS node. Then generalised the question to all 49.
+
+**What I observed:**
+
+`cpu` emits only **2 of its 10** metric families on EKS:
+```
+node_cpu_seconds_total          16 series
+node_cpu_guest_seconds_total     4 series
+```
+The sysfs-based families — `core_throttles_total`, `package_throttles_total`, `frequency_hertz`,
+`flag_info`, `bug_info`, `isolated`, `online`, `info` — produce nothing, because EC2 does not expose
+that sysfs. **PNE emits exactly the same 2 families with `success=1`**, so this is absence of hardware,
+not a defect in either implementation.
+
+Generalising across all 49 enabled collectors:
+```
+collectors enabled       49
+  succeeding             39
+  failing (no hardware)  10  -> bcachefs bonding fibrechannel hwmon ipvs
+                                nfs nfsd rapl tapestats zfs
+node_* families emitted  304
+```
+
+**Implication for the plan.** `GOAL-NO-DEPENDENCY.md` §3 scoped N3 as "port the 49 collectors observed
+enabled." That was measured from `node_scrape_collector_success` *existing*, which conflated "enabled"
+with "producing data". Ten of those collectors emit **nothing** on any EKS node — porting them means
+writing code whose output is provably empty on every target host, purely so a `success=0` series
+appears.
+
+This is a real decision, not a detail:
+
+- **Port all 49** — the `success=0` series for absent hardware is itself part of the contract. An
+  operator alerting on `node_scrape_collector_success == 0` would see a different series set otherwise.
+  Costs ~10 collectors of effort for zero metric output.
+- **Port the 39 that produce data, and emit `success=0` for the other 10 without implementing them** —
+  same observable contract on EKS, far less code. But it is a lie in the metric: we would be reporting
+  "this collector ran and failed" when it never ran.
+- **Port the 39 and drop the other 10 entirely** — honest, smallest, but the `success` series set
+  differs from PNE, which the three-way harness will correctly flag as divergence.
+
+**Leaning toward porting all 39 data-producing collectors first, then deciding on the 10 with the
+harness in hand** — the diff will show exactly what dropping them costs, which is better evidence than
+my judgement now. Recorded so the decision is explicit rather than drifting.
+
+**Also worth noting:** the 10 failing collectors are the same set identified on the dependency branch as
+"absent hardware, identical failure sets between both exporters." Consistent finding, arrived at
+independently.
+
+**Next:** port `cpu` (the 2 families that produce data, with the sysfs paths implemented so they work on
+hardware that has them), then `stat`, `vmstat`, `filesystem`, `diskstats`, `netdev`.
+
+---
