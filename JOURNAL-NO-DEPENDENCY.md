@@ -1063,3 +1063,139 @@ TOTAL 20 collectors, 1152 series, 0 errors, 0 nodata
 `dmmultipath`, `textfile`).
 
 ---
+## N3 — `os`, `time`, `timex`: a FIFTH upstream defect, and this one is reachable
+
+### The second real data race, in `os_release.go`
+
+Upstream declares an `osMutex` and then **only half-uses it**. `UpdateStruct` takes the write lock:
+
+```go
+c.osMutex.Lock()
+defer c.osMutex.Unlock()
+c.os, err = parseOSRelease(releaseFile)
+```
+
+but `Update` reads those same fields with **no read lock**, after the deferred `Unlock` has already
+fired:
+
+```go
+ch <- prometheus.MustNewConstMetric(osInfoDesc, prometheus.GaugeValue, 1.0,
+    c.os.BuildID, c.os.ID, ...)   // unguarded
+```
+
+Reproduced with `-race` against a faithful copy of upstream's locking structure. The detector reports
+writes at `UpdateStruct` against reads in `Update` on **`c.os`, `c.version` AND `c.supportEnd`** — three
+separate races.
+
+**Reachability, checked before claiming it.** This one is materially different from the netstat
+blank-line panic. `node_exporter`'s `--web.max-requests` **defaults to 40**, so promhttp serves up to 40
+concurrent scrapes and nothing serialises collectors. Two Prometheus servers scraping one node — or one
+server plus a human running `curl` — is sufficient. No exotic input required, no unusual kernel.
+
+**The presence of a half-used mutex is itself evidence someone already knew this needed guarding.**
+
+**The fix, and why it is better than just adding `RLock`:** parse once, cache, and hold the read lock for
+the whole emit. `/etc/os-release` cannot change without a reboot, so re-reading it every scrape bought
+nothing and cost a file open per scrape *on top of* the race.
+
+Negative control: reverting `load()` to upstream's structure makes my own regression test fail with
+`WARNING: DATA RACE`. Restored, it passes — and passes three consecutive `-race` runs.
+
+**One more divergence in the same file.** Upstream's `parseOSRelease` does
+`return &osRelease{...}, err` — returning a **populated struct alongside an error**, so a caller who
+ignored the error gets a half-parsed struct that looks valid. Ours returns `nil` on error, making that
+mistake impossible rather than merely discouraged. Asserted.
+
+**Also rebased onto the host root**, which upstream does too but which is worth stating: in a container
+`/etc/os-release` is the *container's* (the agent's base image), not the node's. Reporting the base image
+as the node OS would be wrong in a way that looks entirely plausible.
+
+### `timex`: three different divisors on fields of one struct
+
+This is the densest unit-conversion collector in the whole set:
+
+```
+offset, jitter           -> divisor DEPENDS ON THE STA_NANO STATUS BIT (1e9 or 1e6)
+maxerror, esterror, tick -> ALWAYS microseconds, EVEN WHEN STA_NANO IS SET
+freq, ppsfreq, stabil    -> 16-bit-fraction PPM: 1e6 * 65536
+freq additionally        -> has 1 ADDED (it is a ratio around 1.0, not an offset around 0)
+shift, tai, constant     -> NO conversion at all (shift is an exponent despite _seconds)
+```
+
+Hardcoding either side of the conditional divisor is a 1000x error **on half the machines in existence**,
+and the metric still exists with a plausible small value. Omitting freq's `+1` reports a ratio of ~0 —
+a stopped clock. Each is asserted against a computed expectation, including that `maxerror`/`esterror`/
+`tick` produce **identical** values with STA_NANO set and clear.
+
+**A distinction that is easy to miss:** `sync_status` comes from `adjtimex`'s **return value** (the clock
+state enum, `TIME_ERROR=5`), not from `timex.Status` (a bitmask). They are different things. The test sets
+`Status: 8193` while returning `TIME_ERROR` so that deriving `sync_status` from `Status` would fail. Also
+asserted that states 0–4 (`TIME_OK`, `TIME_INS`, `TIME_DEL`, `TIME_OOP`, `TIME_WAIT`) all mean
+*synchronised* — a leap-second insertion is not a sync failure.
+
+`syscall.EPERM` vs `os.ErrPermission` gets its own test: `errors.Is` bridges them only because
+`syscall.Errno` implements `Is`, and a refactor to `==` would turn a hardened seccomp sandbox into a
+reported scrape failure.
+
+**Why these two collectors matter on EKS:** clock skew breaks certificate validation, SigV4 request
+signing (which rejects a 5-minute skew), and cross-node log correlation — and **none of those failures
+name the clock as the cause**.
+
+### `time`: one upstream inefficiency fixed
+
+Upstream's `time_linux.go` calls `sysfs.NewFS(*sysPath)` **inside `update()`**, re-stating the mount point
+on every scrape. Moved to construction, so a bad path fails at startup rather than every 15 seconds
+forever. Also asserted that `now` and `zone_offset` are emitted *before* the sysfs read, so a clocksource
+failure does not cost the two metrics actually used for skew detection.
+
+### Two mistakes of my own this round
+
+**A hardcoded epoch, off by exactly one day.** I wrote `1836604800` for `2028-03-15` from memory; the
+correct value is `1836691200` — 86400 seconds out. The test now *computes* it with
+`time.Date(2028, 3, 15, ...).UTC().Unix()` and additionally pins the literal, so the constant is checked
+rather than trusted. A hardcoded epoch is impossible to eyeball.
+
+**A flaky test that also did not work.** My first attempt to cover the double-checked re-check raced two
+goroutines with a `time.Sleep` to force the interleaving. It was **both flaky and still uncovered** — the
+window is nanoseconds. Rather than tune the sleep, I restructured `load()` into `cached()` + `loadSlow()`
+so the re-check is directly callable. Strictly better than a timing-dependent test: the lock discipline
+is now checkable by reading one four-line function, which matters here of all places, since **upstream's
+bug was precisely a lock that looked held and was not**. Added a test that `cached()` cannot be blocked
+while a read lock is held, so a regression to the write lock fails rather than silently serialising every
+scrape.
+
+**Malformed-input tests used REAL failing inputs**, found by running `envparse` directly rather than
+inventing something and hoping: empty key, unmatched quote, invalid escape, bad key character, missing
+`=`. And the unparseable-`VERSION_ID` branch needed a 400-digit number — contrived, but it is the only way
+in, and the branch must exist because the regexp guarantees "starts with digits", not "parses as a float".
+
+### Live validation — 23 collectors
+
+```
+cpu 320  softnet 224  netclass 150  netdev 128  schedstat 96  filesystem 63  meminfo 49
+netstat 42  sockstat 20  diskstats 18  timex 17  conntrack 10  time 7  vmstat 7  stat 6
+pressure 5  udp_queues 4  os 3  loadavg 3  arp 2  entropy 2  filefd 2  uname 1
+TOTAL 23 collectors, 1179 series, 0 errors, 0 nodata
+```
+
+**Gates:** coverage 100.0% · race clean (3 consecutive runs, checking for flakes) · vet clean ·
+staticcheck clean · no-dependency gate PASS with passing self-test · 351 tests (was 301) ·
+`.covignore` untouched.
+
+**Progress: 23 of 39.**
+
+**Upstream defects found: 5.**
+| # | defect | reachable on EKS? |
+|---|---|---|
+| 1 | filesystem data race (two unsynchronised writers) | yes |
+| 2 | vmstat malformed-line panic | no (needs malformed /proc) |
+| 3 | netclass #1915/#1841 all-or-nothing device read | **yes, routinely** (CNI churn) |
+| 4 | netstat empty-line panic | no (kernel never emits one) |
+| 5 | os_release half-used mutex, 3 racing fields | **yes** (max-requests defaults to 40) |
+
+**Next:** the hardware group — `thermal_zone`, `powersupplyclass`, `cpufreq`, `edac`, `nvme`, `mdadm`,
+`btrfs`, `xfs`, `watchdog`, `dmi`, `infiniband`, `selinux`, `kernel_hung`, `dmmultipath`, `textfile`.
+Most emit nothing on EC2 (absent hardware), which is itself the parity requirement: upstream reports the
+same collectors as failing on these nodes, so matching that is the target rather than making them succeed.
+
+---
