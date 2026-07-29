@@ -182,3 +182,58 @@ fixtures copied, tests ported, and the three-way harness green for that collecto
 in bulk: a 10.6k-line commit that fails parity is undebuggable.
 
 ---
+## [2026-07-29T03:35Z] N3 in progress — meminfo ported; a mechanical check caught a real parity break
+
+**Phase:** N3
+**Status:** confirmed (2 of 49 collectors ported: loadavg, meminfo)
+
+**What I did:** Ported `meminfo`, deliberately chosen second because it is the collector that proves why
+parity must be measured rather than enumerated.
+
+**Finding — upstream silently drops kernel fields, and parity requires reproducing that.** Measured on
+the test host:
+```
+keys in /proc/meminfo            55
+fields upstream hand-maps        51
+node_memory_* actually emitted   49
+```
+`procfs.Meminfo()` only models the keys it knows about, and upstream hand-maps a subset of those. So
+upstream drops kernel fields it does not model. **Reusing `procfs` reproduces that exactly, including
+the blind spot — which is what parity requires.** Writing our own `/proc/meminfo` parser would emit
+*more* metrics than upstream and break parity in the opposite direction. That is an argument for
+interpretation A that I had not anticipated when planning: keeping `procfs` is not merely convenient,
+it is load-bearing for parity.
+
+**A real parity break in my own code, caught mechanically within minutes of writing it.**
+
+After porting, I diffed my field table against upstream's source programmatically rather than by eye:
+```
+upstream keys: 51   ours: 52   IDENTICAL: False
+  extra in ours (1): ['Hugetlb_bytes']
+```
+I had added `Hugetlb_bytes` because `procfs.Meminfo` exposes `HugetlbBytes` and it looked like an
+obvious omission on upstream's part. It is not in upstream's map, so emitting it would have produced a
+metric upstream lacks.
+
+**This is the failure mode that a name-list comparison would never catch**, because an *extra*
+plausible-looking metric does not trip any "missing metric" check, and on a live diff it appears as
+`+SERIES node_memory_Hugetlb_bytes` which is easy to rationalise as an improvement. Removed; now 51/51.
+
+**Encoded as a permanent test**, `TestMeminfoFieldsMatchUpstream`, which parses upstream's source at
+test time and fails on any asymmetry in either direction. It skips cleanly when upstream is not checked
+out alongside, so it does not break CI elsewhere.
+
+**A second self-inflicted test bug**, worth recording as a pattern: `TestMeminfoMetricNamesAreRuntimeGenerated`
+asserts the assembled name never appears in the source — and failed, because the file's own *doc
+comment* explains that the name never appears in code. The test was checking prose rather than
+implementation. Fixed by stripping comment lines first. Two for two now on tests that failed because I
+asserted against the wrong artifact.
+
+**Gates:** `pkg/hostmetrics` coverage 97.9% (down from 100% — three uncovered branches in the new
+collector to close), tests pass, gofmt clean.
+
+**Next:** close the coverage gap, then continue N3 with `cpu`, `filesystem`, `diskstats`, `netdev`,
+`stat`, `vmstat` — the remaining high-value collectors. Run the three-way harness once enough are ported
+to make the comparison meaningful.
+
+---
