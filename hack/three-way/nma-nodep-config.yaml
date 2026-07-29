@@ -1,0 +1,20 @@
+# Config for the no-upstream-dependency variant.
+#
+# Identical to the dependency variant's config except for two fields:
+#   address: :9102   (so both can share the host network)
+#   implementation: native
+#
+# Everything else is held constant deliberately -- includeExporterMetrics in
+# particular, since it changes the series count and would confound the comparison.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nma-nodep-monitor-config
+  namespace: kube-system
+data:
+  config.yaml: |
+    metrics:
+      enabled: true
+      address: ":9102"
+      includeExporterMetrics: true
+      implementation: native

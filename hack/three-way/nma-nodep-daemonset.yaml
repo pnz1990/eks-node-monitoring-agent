@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  annotations:
+  labels:
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/instance: eks-node-monitoring-agent
+    app.kubernetes.io/name: nma-nodep
+    app.kubernetes.io/version: 1.6.7
+    helm.sh/chart: eks-node-monitoring-agent
+  name: nma-nodep
+  namespace: kube-system
+spec:
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: eks-node-monitoring-agent
+      app.kubernetes.io/name: nma-nodep
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/restartedAt: "2026-07-29T00:48:55Z"
+      labels:
+        app.kubernetes.io/component: controller
+        app.kubernetes.io/instance: eks-node-monitoring-agent
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/name: nma-nodep
+        app.kubernetes.io/version: 1.6.7
+        helm.sh/chart: eks-node-monitoring-agent
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: eks.amazonaws.com/compute-type
+                operator: NotIn
+                values:
+                - fargate
+                - auto
+                - hybrid
+              - key: sagemaker.amazonaws.com/compute-type
+                operator: NotIn
+                values:
+                - hyperpod
+              - key: kubernetes.io/arch
+                operator: In
+                values:
+                - amd64
+                - arm64
+      containers:
+      - args:
+        - --probe-address=:8012
+        - --metrics-address=:8013
+        env:
+        - name: HOST_ROOT
+          value: /host
+        - name: MY_NODE_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: spec.nodeName
+        image: 569190534191.dkr.ecr.us-west-2.amazonaws.com/eks/eks-node-monitoring-agent:nodep-v1
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: 8002
+            scheme: HTTP
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        name: nma-nodep
+        ports:
+        - containerPort: 9102
+          hostPort: 9102
+          name: metrics
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 250m
+            memory: 200Mi
+          requests:
+            cpu: 10m
+            memory: 30Mi
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+          privileged: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /host
+          name: host-root
+        - mountPath: /etc/nma
+          name: monitor-config
+          readOnly: true
+      dnsPolicy: ClusterFirst
+      hostNetwork: true
+      hostPID: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      priorityClassName: system-node-critical
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      serviceAccount: eks-node-monitoring-agent
+      serviceAccountName: eks-node-monitoring-agent
+      terminationGracePeriodSeconds: 30
+      tolerations:
+      - operator: Exists
+      volumes:
+      - hostPath:
+          path: /
+          type: ""
+        name: host-root
+      - configMap:
+          defaultMode: 420
+          name: nma-nodep-monitor-config
+          optional: true
+        name: monitor-config
+  updateStrategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 10%
+    type: RollingUpdate

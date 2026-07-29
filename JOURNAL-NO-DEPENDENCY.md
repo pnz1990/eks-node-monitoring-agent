@@ -1781,3 +1781,114 @@ with passing self-test · 565 tests.
 nma-nodep 9102), N6 three-way validation of metrics AND logs, N7 stress/load, N8 design doc.
 
 ---
+## N5 + N6 COMPLETE — three-way deployment and validation on the live cluster
+
+### N5: all three variants running on the same nodes
+
+```
+kube-system   eks-node-monitoring-agent   2/2   :9101   implementation=upstream
+kube-system   nma-nodep                   2/2   :9102   implementation=native
+monitoring    pne-prometheus-node-exporter 2/2  :9100   (reference)
+```
+
+Image `nodep-v1` (`c53b6fb`), tagged immutably rather than deployed as `latest`: with three
+variants under comparison, "which image is actually running" cannot be a question.
+
+The two agents share the service account, host mounts and node set, differing only in image
+tag, config, and the health/metrics ports (8012/8013 vs 8002/8003) so they can coexist on
+`hostNetwork`. A `hostPort` I had missed rejected the first apply — it must equal
+`containerPort` under `hostNetwork`.
+
+### N6 metrics: all three agree
+
+```
+T1 STRUCTURAL   pne vs nma-dep    : only-pne=0  only-nma-dep=0     <- POSITIVE CONTROL
+                pne vs nma-nodep  : only-pne=0  only-nma-nodep=0
+                nma-dep vs nodep  : 0           0
+T2 COLLECTOR    pne vs nma-dep    : 49 shared, 0 disagree
+                pne vs nma-nodep  : 39 shared, 0 disagree
+                nma-dep vs nodep  : 39 shared, 0 disagree
+                hwmon             : 0 on all three  <- the inversion holds
+T3 SERIES       all three pairs   : 0 families differ in count
+
+SUMMARY  pne 773 series / 347 families / 49 collectors
+         nma-dep 727 / 345 / 49
+         nma-nodep 707 / 345 / 39
+```
+
+**Zero disagreements on metric names and on every shared collector's success value.**
+
+Two differences are expected and are now encoded with their reasons rather than
+rediscovered each run:
+
+1. `promhttp_metric_handler_requests_total` / `_requests_in_flight` on pne only. These come
+   from `promhttp.InstrumentMetricHandler`, which upstream's binary calls and this agent
+   does not — they describe the scrape endpoint, not the node. Both agents do have
+   `promhttp_metric_handler_errors_total`, which `HandlerFor` provides. Whether the agent
+   should adopt `InstrumentMetricHandler` is a separate decision, noted for the design doc.
+2. `node_filesystem_readonly` / `_device_error`: pne 25 series, both agents 4. **The EKS
+   mount exclusion working**, and the log evidence confirms it rather than inferring it —
+   1,102 and 168 `ignoring mount point` lines respectively. pne reports per-pod
+   `volume-subpaths/config/grafana/N` and containerd sandbox `shm` mounts, each with a
+   unique pod UID; the agents report `/ /boot/efi /run /tmp`.
+
+**The harness self-tests on every run.** Three injected defects, one per tier:
+
+```
+T1 remove a metric family      -> detected 1
+T2 flip hwmon success 0 -> 1   -> detected 1
+T3 drop one CPU's series       -> detected 1
+```
+
+A comparison reporting "no differences" is worthless unless it can be shown to report them
+when they exist, and a self-test behind a flag is a self-test nobody runs.
+
+### N6 logs: the half a metrics comparison cannot cover
+
+A collector can export a correct metric set while logging an error every scrape — metrics
+pass, log volume doubles. So:
+
+```
+ERRORS/PANICS      pne 0   nma-dep 0   nma-nodep 0
+RESTARTS           nma-dep 0   nma-nodep 0        (an escaped panic would restart)
+WARN messages      identical sets
+DEBUG volume       ratio nodep/dep = 0.07         (the native variant is QUIETER)
+implementation     nma-nodep: native (2 pods)  nma-dep: upstream
+```
+
+**That last line is the one that makes everything above meaningful.** If nma-nodep were
+silently running the upstream implementation, every comparison would be of the same code
+against itself. It is checked explicitly, in both directions.
+
+### Four harness bugs of mine in this phase, and one that was the worst possible kind
+
+1. **Case-sensitive message match.** nma-dep logs `"Ignoring mount point"` (upstream's
+   capital I), nma-nodep logs it lowercase. My grep reported 0 for nma-dep and then printed
+   "the exclusion may not be running" — about a collector that was working correctly. A
+   message comparison across two codebases has to be case-insensitive.
+
+2. **`--tail` on a once-written line.** The startup line ages out of any tail window on a
+   long-running pod.
+
+3. **`kubectl logs -l` does not return full per-pod history.** It gave 20 lines where a
+   single pod had 348. Now queried per pod by name.
+
+4. **`set -e` + a grep that finds nothing.** nma-dep does not log an `implementation` field
+   (it predates the switch), so its grep exited 1 and **killed the script at that line** —
+   printing the section header and nothing else. The files were correct all along.
+
+Bugs 2, 3 and 4 all produced the *same* false alarm: "the native variant may be running the
+upstream implementation." That is the worst possible false alarm here, because it is the one
+claim that would invalidate every other result — and I hit it three separate ways before the
+data was actually wrong even once.
+
+Bug 4 is the same shape as the SIGPIPE bug on the dependency branch: **a check that reports
+nothing precisely when the interesting case occurs.** There, grep closing the pipe killed
+curl; here, grep finding nothing killed the script. Worth naming as a recurring hazard in
+shell harnesses under `set -e`.
+
+Evidence captured in `evidence/three-way-validation.md`.
+
+**Remaining: N7 stress/load across all three, N8 the design doc with a recommendation.**
+
+---
