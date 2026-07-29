@@ -352,3 +352,54 @@ are the two with known upstream defects (#1672, #1915/#1841), so those are where
 containing becomes possible.
 
 ---
+## [2026-07-29T04:20Z] N3 — vmstat and stat ported (5 of 39). Found a real upstream panic.
+
+**Phase:** N3
+**Status:** confirmed
+
+**Two parity-critical details in `vmstat`:**
+
+1. **The default field filter.** `/proc/vmstat` has ~200 fields; upstream emits only those matching
+   `^(oom_kill|pgpg|pswp|pg.*fault).*`, which on a live EKS node is exactly 7 series. Emitting the
+   unfiltered set would produce ~200 series — the same "extra plausible metrics" failure as the
+   `Hugetlb_bytes` mistake, and equally invisible to a missing-metric check. Asserted against upstream's
+   source in `TestVMStatDefaultPatternMatchesUpstream`.
+
+2. **An upstream panic this port fixes.** `collector/vmstat_linux.go`:
+   ```go
+   parts := strings.Fields(scanner.Text())
+   value, err := strconv.ParseFloat(parts[1], 64)   // no length check
+   ```
+   A single-token or empty line in `/proc/vmstat` indexes `parts[1]` out of range and **panics**.
+   Verified by reading the source; `strings.Fields("solitary")` returns a one-element slice.
+
+   This is one of the "fix directly rather than contain" gains the branch was supposed to deliver, and
+   it is the first concrete instance. On the dependency branch this panic is *contained* by the
+   resilience layer — the agent survives, but vmstat produces nothing for that scrape. Here it does not
+   happen at all: a malformed line is skipped with a debug log and the other ~199 fields still report.
+
+   **Worth filing upstream.** Added to the follow-ups in `OPEN-QUESTIONS.md`.
+
+**A deliberate divergence, recorded:** upstream returns an error on an unparseable *value*, failing the
+whole collector. Skipping the single bad field keeps the rest, which is the better trade for a 200-field
+file. This changes `node_scrape_collector_success` behaviour under malformed input — ours reports 1
+where upstream reports 0. Recorded in `docs/parity-exceptions-nodep.md`; the three-way harness will not
+see it, since it needs malformed input to trigger.
+
+**`stat`** was straightforward. One detail that would silently rename six metrics: these use an *empty*
+subsystem, so they sit directly under `node_` — `node_intr_total`, not `node_stat_intr_total`. Also
+`node_softirqs_total` is gated on `--collector.stat.softirq` which defaults OFF, so it is not ported;
+asserted in a test so it cannot appear by accident.
+
+**Two more unreachable branches made testable rather than excluded:** the invalid-regexp check (kept
+because the pattern becomes operator-configurable the moment it is wired to the chart) and
+`scanner.Err()` (reached with a line exceeding `bufio.MaxScanTokenSize`).
+
+**Gates:** coverage 100.0% · race clean · staticcheck clean.
+
+**Progress: 5 of 39** — `loadavg`, `meminfo`, `cpu`, `vmstat`, `stat`.
+
+**Next:** `filesystem`, `diskstats`, `netdev`, `netclass`. `filesystem` and `netclass` carry the known
+upstream defects (#1672, #1915/#1841), so those are where "fix rather than contain" gets tested properly.
+
+---
