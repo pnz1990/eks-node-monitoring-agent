@@ -1199,3 +1199,131 @@ Most emit nothing on EC2 (absent hardware), which is itself the parity requireme
 same collectors as failing on these nodes, so matching that is the target rather than making them succeed.
 
 ---
+## N3 — the hardware group, part 1: `thermal_zone`, `cpufreq`, `edac`, `kernel_hung`
+
+### The contract for this group is "success with ZERO SERIES", not ErrNoData
+
+Almost none of this hardware exists on EC2. Measured against the live cluster's PNE scrape:
+
+```
+collector          success   series
+thermal_zone         1          0
+cpufreq              1          0
+edac                 1          0
+watchdog             1          0
+powersupplyclass     1          0
+infiniband           1          0
+btrfs                1          0
+mdadm                1          0
+dmi                  1          1
+selinux              1          3
+kernel_hung          1          0
+hwmon                0          -     <-- the ONE that legitimately fails
+```
+
+`ErrNoData` sets `node_scrape_collector_success=0`, so returning it where upstream returns `nil` would
+differ from upstream **on every EKS node** and fire any alert watching collector failures. **I got exactly
+this wrong once before on the dependency branch** — asserted zero collector failures when upstream fails
+the same set on EKS — so it is now the first assertion in the test file rather than an assumption.
+
+**The mechanism, which is worth naming because reproducing it means NOT being helpful:** procfs's sysfs
+helpers use `filepath.Glob`, which returns an **empty slice** rather than an error when nothing matches.
+So "no thermal zones" is indistinguishable from "an empty list of thermal zones" and the loop body simply
+never runs. Adding a well-meaning `if len(x) == 0 { return ErrNoData }` would break parity.
+
+### Three defects in my own port, all caught mechanically rather than by reading
+
+I compared descriptor **name + help text + label set** against upstream's source programmatically. That
+found:
+
+1. **`node_cpu_frequency_avg_hertz` was missing entirely.** Upstream's cpufreq descriptors live in
+   `cpufreq_common.go`, not `cpufreq_linux.go`, and I had read only the latter. **A dropped metric is
+   invisible to any test that checks the metrics which ARE present** — this is the failure mode the whole
+   mechanical-diff approach exists to catch.
+2. **Help text differed:** I wrote "cpu thread" where upstream writes "CPU thread". Help text is part of
+   the exposition output, so that is a real diff against the reference endpoint.
+3. **EDAC channel metrics carry FOUR labels** (`controller`, `csrow`, `channel`, `dimm_label`), not two.
+   A two-label version is a different metric that no existing query matches. I had also missed that
+   `ce_noinfo_count`/`ue_noinfo_count` are emitted as csrow metrics with `csrow="unknown"` — errors the
+   controller could not attribute to a row. Dropping them would lose real error counts.
+
+After correcting: `cpufreq 8/8 identical (name+help+labels)`, `edac 6/6 identical`,
+`thermal_zone 3/3 identical`.
+
+### An upstream asymmetry preserved, and a nil-deref guarded
+
+EDAC's channel `ue_count` read failure is **logged and skipped**, while every other read failure aborts
+the collector. That looks like an oversight but is load-bearing: some hardware exposes `ch*_ce_count`
+without `ch*_ue_count`, so failing would lose the whole collector there. Both halves are now pinned —
+`TestEDACChannelMissingUECountIsSkippedNotFatal` and `TestEDACChannelCECountUnreadableIsFatal`.
+
+`kernel_hung`: upstream dereferences `HungTaskDetectCount` **unconditionally**, so a nil pointer with a
+nil error would panic. Guarded here. A nil-deref in a collector is far worse than a missing metric, and
+the resilience layer should not be the only thing between this and a crash.
+
+### The `dimm_label` substitutions are not cosmetic
+
+`"#"` is stripped and `"csrow"`/`"channel"` get an underscore prefix, so a BIOS label `CPU#1_csrow0`
+becomes `CPU1__csrow0`. Copied verbatim and asserted, because changing them changes the label value on
+real hardware.
+
+### Two fixture mistakes of my own — both my fixture, not the collector
+
+Building the "absent hardware" fixture took two corrections, and the second was genuinely informative:
+
+1. procfs's `SystemCpufreq` reads `devices/system/cpu/offline` **unconditionally**, and that file exists
+   on every real host (verified here: mode 0444, empty). My first fixture omitted it, so cpufreq "failed"
+   for a reason no real machine would hit.
+2. It also needs at least one `cpu[0-9]*` directory. With **none**, procfs returns
+   `could not find any cpufreq files`. With CPUs present and no `cpufreq` subdirectory it returns a
+   **pre-sized slice of zero-valued entries and a nil error**, because it does
+   `make([]SystemCPUCpufreqStats, len(cpus))` up front and fills only what it can read.
+
+**That second point IS the mechanism behind success=1-with-no-series on EC2**, and it explains why every
+field is a pointer: the zero-valued entries have `nil` everywhere and emit nothing. An "absent hardware"
+fixture missing a file every real machine has would have tested nothing useful. Confirmed by probing the
+live collector on this host — 32 CPUs, no cpufreq directories, `series=0 err=nil`, matching the golden.
+
+### Reachability of the EDAC glob errors, checked rather than assumed
+
+`filepath.Glob` errors **only** on `ErrBadPattern`. The patterns are compile-time constants — but they are
+joined onto a **caller-supplied sysfs root**, so a root containing `[` makes the pattern invalid. Verified:
+`filepath.Glob("/tmp/[")` returns `syntax error in pattern`. That makes the error branches genuinely
+reachable and worth handling.
+
+The **regexp-mismatch** branches, by contrast, cannot be reached through the real glob at all: every path
+it returns necessarily contains `devices/system/edac/mc/mc`, which is exactly what the regexp requires.
+Upstream has the same dead branch. Kept the guards (they matter if either pattern changes) and covered
+them through the injected glob, rather than deleting a check to make a coverage number.
+
+**One more of my own:** my first nested-glob test *rewrote* the pattern instead of returning the error,
+which left the csrow branch uncovered. Only the coverage report showed it — the test passed.
+
+### Live validation — 27 collectors
+
+```
+cpu 320  softnet 224  netclass 150  netdev 128  schedstat 96  thermal_zone 64
+filesystem 63  meminfo 49  netstat 42  sockstat 20  diskstats 18  timex 17
+conntrack 10  time 7  vmstat 7  stat 6  pressure 5  udp_queues 4  os 3
+loadavg 3  arp 2  entropy 2  filefd 2  uname 1  cpufreq 0  edac 0  kernel_hung 0
+TOTAL 27 collectors, 1243 series, 26 success + 1 nodata
+```
+
+`cpufreq` and `edac` report **success with 0 series** — exactly the EC2 contract.
+
+**The one nodata is `kernel_hung`, and it is NOT a divergence.** `hung_task_detect_count` needs kernel
+6.7. This dev host runs **6.12.94** and does not have the file; the EKS node runs **6.18.38** and does,
+which is why the cluster golden shows `success=1` there. Correct behaviour on both, and worth checking
+rather than assuming a mismatch.
+
+**Gates:** coverage 100.0% · race clean · vet clean · staticcheck clean · no-dependency gate PASS ·
+388 tests (was 351) · `.covignore` untouched.
+
+**Progress: 27 of 39.**
+
+**Next:** the rest of the hardware group — `powersupplyclass`, `watchdog`, `dmi`, `selinux`, `nvme`,
+`mdadm`, `btrfs`, `xfs`, `infiniband`, `dmmultipath`, `textfile`, `hwmon`. Note `hwmon` is the one
+collector that legitimately reports `success=0` on EKS, so matching that means it must FAIL, not succeed
+emptily.
+
+---
