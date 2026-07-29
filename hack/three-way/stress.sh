@@ -221,6 +221,25 @@ log "  cluster: $baseline_pods pods"
 
 log ""
 log "=== APPLYING PRESSURE ==="
+
+# THE PRESSURE MANIFESTS REQUIRE nodeSelector pressure=true. Without that label they are
+# accepted by the API server, reported as "applied", and then sit Unschedulable forever --
+# so the run produces a "under pressure" column that is really a second baseline.
+#
+# That is exactly what happened on the first 6-node run: 4 newly-scaled nodes had no
+# pressure label, every pod-churn pod was Pending with "6 node(s) didn't match Pod's node
+# affinity/selector", and the pod count still ROSE (from the cpu-saturation DaemonSet, which
+# tolerates everything) so the existing "did the pod count rise?" check was satisfied.
+# A passing pressure run with no pressure applied is the worst outcome this script can
+# produce, so the label is now ensured up front and verified after.
+unlabelled=$(kubectl get nodes -l '!pressure' --no-headers 2>/dev/null | wc -l)
+if [ "$unlabelled" -gt 0 ]; then
+  log "  labelling $unlabelled node(s) with pressure=true (required by the manifests' nodeSelector)"
+  kubectl label nodes --all pressure=true --overwrite >/dev/null 2>&1 || \
+    fail "could not label nodes; the pressure workloads will not schedule"
+fi
+log "  nodes eligible for pressure: $(kubectl get nodes -l pressure=true --no-headers 2>/dev/null | wc -l)"
+
 applied=()
 for m in "$PRESSURE_DIR"/01-pod-churn.yaml "$PRESSURE_DIR"/03-mount-churn.yaml "$PRESSURE_DIR"/02-cpu-saturation.yaml; do
   [ -f "$m" ] || { log "  skip (absent): $m"; continue; }
@@ -252,13 +271,41 @@ sleep "$SETTLE"
 pressure_pods=$(kubectl get pods -A --no-headers | wc -l)
 log "  cluster: $pressure_pods pods (was $baseline_pods)"
 
-# A pressure run where the pressure did not materialise proves nothing. Reported rather
-# than failed, because pod-churn is transient by design and the count can legitimately be
-# similar at the instant it is sampled.
+# A pressure run where the pressure did not materialise proves nothing -- and the pod COUNT
+# is too weak a signal to establish that it did. The cpu-saturation DaemonSet tolerates
+# everything, so it schedules and raises the count even when every churn pod is Unschedulable.
+# The first 6-node run passed this check with zero churn actually running.
+#
+# So the churn Jobs are now verified DIRECTLY, by their own status: a Job with 0 running and 0
+# succeeded pods did not apply any pressure, whatever the cluster-wide pod count says.
+log ""
+log "  verifying the pressure actually materialised:"
+pressure_ok=1
+for job in pod-churn mount-churn; do
+  active=$(kubectl get job "$job" -n default -o jsonpath='{.status.active}' 2>/dev/null)
+  succeeded=$(kubectl get job "$job" -n default -o jsonpath='{.status.succeeded}' 2>/dev/null)
+  active=${active:-0}; succeeded=${succeeded:-0}
+  log "    $job: ${active} active, ${succeeded} completed"
+  if [ "$active" -eq 0 ] && [ "$succeeded" -eq 0 ]; then
+    pressure_ok=0
+    pending=$(kubectl get pods -n default --field-selector status.phase=Pending \
+      --no-headers 2>/dev/null | wc -l)
+    log "      ^ NEITHER RUNNING NOR COMPLETING. $pending pod(s) Pending cluster-wide."
+    kubectl get pods -n default -l "pressure=${job%%-*}-churn" -o jsonpath='{.items[0].status.conditions[0].message}' 2>/dev/null \
+      | head -c 300 | sed 's/^/      /' || true
+  fi
+done
+sat=$(kubectl get ds cpu-saturation -n default -o jsonpath='{.status.numberReady}' 2>/dev/null)
+log "    cpu-saturation: ${sat:-0} ready"
+
+if [ "$pressure_ok" -eq 0 ]; then
+  fail "the churn workloads did not run -- the 'under pressure' numbers below would be a
+      SECOND BASELINE, and reporting them as a pressure result would be worse than
+      reporting nothing. Check the pressure=true node label and pod capacity."
+fi
 if [ "$pressure_pods" -le "$baseline_pods" ]; then
-  log "  NOTE: pod count did not rise. Pod churn is transient, so this may be a sampling"
-  log "        artefact -- but if CPU saturation also failed to schedule, the 'under"
-  log "        pressure' numbers below are really a second baseline."
+  log "  NOTE: cluster pod count did not rise, though the jobs report activity. Pod churn is"
+  log "        transient by design, so this can be a sampling artefact."
 fi
 
 # ---------------------------------------------------------------------------

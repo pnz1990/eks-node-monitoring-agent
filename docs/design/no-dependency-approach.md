@@ -60,11 +60,26 @@ T1 metric names        pne vs nma-dep     0 differences    <- positive control
 T2 collector success   49 shared / 0 disagree  (pne vs nma-dep)
                        39 shared / 0 disagree  (both, vs nma-nodep)
 T3 series counts       0 families differ, all three pairs
+                       346/346 families identical across all three
 ```
 
-Two expected differences, both explained and encoded in the harness: pne's
-`promhttp_metric_handler_requests_*` (from `InstrumentMetricHandler`, which the agent does
-not call) and the EKS filesystem mount exclusion (pne 25 series, both agents 4).
+Re-run at **6 nodes** on 2026-07-29 with the same result, and with **one fewer exception**:
+`promhttp_metric_handler_requests_*` is no longer excluded, because the agent now calls
+`InstrumentMetricHandler` (Q9). Parity is therefore *stronger* than in the original run — that
+family is now compared like any other and matches.
+
+One expected difference remains: the EKS filesystem mount exclusion (pne 13 series on the
+6-node cluster, both agents 4), which is the pod-mount cardinality exclusion working as
+designed.
+
+**A caveat this tier cannot cover, stated because it cost 13 hours of a silent defect.** T1/T2/T3
+compare names, per-collector success, and series counts. They do **not** compare values, and
+that is still the right call — two scrapes seconds apart differ on every counter. But Q9 found
+`promhttp_metric_handler_errors_total{cause="gathering"}` at **3182 on nma-dep, 9 on nma-nodep,
+0 on pne**, incrementing **once per scrape**: every scrape of both agents was serving a partial
+response, and nothing in this harness could see it because the *name* was present and the
+*count* was right. The blind spot is real; the mitigation is that a value-tier comparison needs
+a Prometheus `rate()` window (§7).
 
 ### Cost and footprint
 
@@ -79,39 +94,65 @@ not call) and the EKS filesystem mount exclusion (pne 25 series, both agents 4).
 The native branch is **~10× the code to own**, and that is the central cost. It also removes
 **37 transitive dependencies**, which is the central benefit.
 
-### Performance: an unexpected result
+### Performance: there is no difference — and the earlier claim was my measurement error
 
-Over the **39 collectors both variants run** — the only apples-to-apples comparison, since
-totals would credit the native variant for running 10 fewer:
+**An earlier revision of this document reported the native variant as ~15× faster, median
+~250×. That was wrong, and it was wrong because of how I measured, not because of anything
+in either implementation.** The correction is kept in the open rather than quietly edited,
+because the retraction is the useful part.
+
+`node_scrape_collector_duration_seconds` measures **wall** time, and every collector runs
+**concurrently**. With fewer usable cores than collectors, each collector's timer keeps
+running while its goroutine is descheduled — so all of them report approximately the *whole
+batch's* window instead of their own work. `stress.sh` **summed** those per-collector values
+and called the total "collection cost", multiplying the real figure by up to the collector
+count.
+
+The giveaway was in the distribution I had already published and misread:
 
 ```
-                   baseline    under pressure
-nma-dep            0.9114s        0.3288s
-nma-nodep          0.0181s        0.0210s
-pne                0.0123s        0.0215s
+              min          median       max      spread
+nma-dep    0.000480s    0.013858s   0.077918s    162×
+GOMAXPROCS=1 (measured while closing Q8):
+nma-dep    0.010862s    0.011322s   0.011806s    1.09×   <- 49 collectors, one window
 ```
 
-The native variant is **~15× faster than the dependency variant** and comparable to pne.
-This was the opposite of what I was testing for, and it needed explaining rather than
-celebrating. The distribution shows a **floor**, not slow work:
+`netclass` walks every network interface; `loadavg` reads one short file. A 1.09× spread
+across 49 such collectors is not 49 similar measurements — it is one measurement reported 49
+times.
+
+Corrected, on wall time, live on the 6-node cluster under pressure:
 
 ```
-              min          median       max
-nma-dep    0.000480s    0.013858s   0.077918s
-nma-nodep  0.000011s    0.000122s   0.007148s
-pne        0.000008s    0.000054s   0.004424s
+             wall (baseline)   wall (pressure)   sum(cc) — the misleading number
+pne             0.0136s           0.0132s              0.0149s
+nma-dep         0.0107s           0.0157s              0.3390s
+nma-nodep       0.0125s           0.0103s              0.0127s
 ```
 
-Collectors doing wildly different amounts of work all land within a whisker of each other
-on `nma-dep`. Partial cause: its relay channel is **unbuffered** where the native one is
-buffered at 1024, so every metric costs a goroutine handoff. Benchmarked in isolation that
-accounts for **~4×, not ~250×** — so it is a real contributor and not the whole story. Ruled
-out: CPU limits (identical) and contention (the gap is *larger* at baseline).
+**All three are within ~1.5× of each other.** Native/upstream wall ratio: **0.66×**, with
+native running 10 fewer collectors — so the difference is scope, not speed. In-process, by
+median over five passes, upstream is **1.22×** native.
 
-**This is a finding about the dependency branch, not an argument for the native one.** It is
-almost certainly fixable there, and tracked as Q8. At 0.9s against a 15s scrape interval it
-breaks nothing today. It should not be weighed as a durable advantage until the remaining
-factor is identified.
+Confirmed three ways: the same 49 collectors run **serially** cost **0.0166s** total against
+the 0.9114s once reported (~55× overstatement); wall times are near-identical; and buffering
+the relay channel — the mechanism I had credited with ~4× — changed nothing (0.5552s →
+0.5243s), so **that change was reverted**.
+
+Also measured and *rejected* as the cause: **CPU throttling.** Both agents genuinely are
+throttled (nma-dep 5124 periods / 337.9s at the chart-default `cpu: 250m`; pne has no limit
+and is never throttled), but raising the limit 8× moved the median from 7.72ms to 8.06ms.
+Real finding, wrong cause — tracked separately as **Q10**, since it is a fact about the
+shipped default rather than about either branch.
+
+**Consequence for this document's recommendation: performance is not a differentiator and
+should carry no weight in the decision.** It previously appeared as reason 3 for holding the
+native branch, on the grounds that a number I could not explain should not be leaned on.
+That was the right instinct for the wrong reason — the number was not real.
+
+Guarded by 4 tests in `pkg/metrics/concurrentduration_test.go`, which assert the conclusion
+rather than machine-specific timings, plus a negative control showing a 264.5× spread when
+cores *are* available.
 
 ---
 
