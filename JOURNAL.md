@@ -428,3 +428,78 @@ instead of reasoning.
 **Next:** triage #1710 cpufreq and #1672 filesystem.
 
 ---
+## [2026-07-29T01:20Z] UNKNOWN FINDING: filesystem cardinality grows with pod count (hostPID)
+
+**Phase:** P3 exploratory (found while triaging #1672)
+**Status:** confirmed — **novel, not in upstream's tracker**
+
+**What I did:** While refuting #1672 (impossible filesystem values) I noticed the two exporters report
+different filesystem counts on the same node, and chased the discrepancy.
+
+**What I observed:**
+```
+NMA: 17 filesystems     PNE: 4 filesystems     NMA-only: 13, PNE-only: 0
+```
+Every one of the 13 extra series is a per-pod ephemeral mount:
+```
+/run/containerd/io.containerd.grpc.v1.cri/sandboxes/<sandbox-id>/shm            (x7)
+/var/lib/kubelet/pods/<pod-uid>/volumes/kubernetes.io~projected/kube-api-access-*  (x6)
+```
+
+**Hypotheses tested and REFUTED:**
+1. *"PNE's chart ships a mount-points-exclude default we lack"* — no; the PNE pod's args contain no
+   exclusion flag.
+2. *"Mount propagation differs"* — it does (PNE has `HostToContainer` on `/host/root`, we have none),
+   but this predicts PNE seeing *more* mounts, the opposite of what happens.
+3. *"`--path.rootfs` prefix filtering differs"* — no; `rootfsStripPrefix` only rewrites the label, and
+   filtering happens on the stripped path.
+
+**Decisive experiment:** ran the *upstream* `node-exporter:v1.12.1` image with NMA's *exact* path flags
+(`--path.procfs=/host/proc --path.rootfs=/host`) on the same node:
+```
+node_filesystem_size_bytes series: 4      per-pod mounts: 0
+```
+So identical flags produce identical-to-PNE output. **The flags are not the cause.**
+
+**Actual root cause** — `collector/filesystem_linux.go:185`:
+```go
+// Fallback to `/proc/self/mountinfo` if `/proc/1/mountinfo` is missing due hidepid.
+mountInfo, err = fs.GetMounts()   // primary path reads <procfs>/1/mountinfo
+```
+The collector reads **PID 1's** mount table. Our DaemonSet sets `hostPID: true`, so PID 1 is the host's
+init and its mount namespace contains every per-pod mount on the node. The PNE DaemonSet does not set
+`hostPID`, so its PID 1 is its own container, whose namespace holds only the handful of real
+filesystems. Confirmed by probe: the host init namespace has 58 mounts of which 13 are pod mounts.
+
+**Why this matters — it is a scaling defect, not a cosmetic difference:**
+- 13 extra series at **20 pods**. These mounts are per-pod, so the count grows roughly linearly with
+  pod density. At 110 pods/node (the EKS default max) this is plausibly ~70+ extra series per node,
+  and each is high-churn: pod UIDs and sandbox IDs are unique and never repeat.
+- High-churn unique label values are the classic Prometheus cardinality problem: every pod
+  create/delete permanently adds a new series to the TSDB for the retention window.
+- It also means `node_filesystem_*` on our endpoint is **not** interchangeable with PNE's for
+  aggregation queries such as `sum(node_filesystem_size_bytes)`, which would double-count tmpfs mounts.
+
+**This is a genuine unknown finding.** It is not in upstream's tracker, because it is not an upstream
+bug: it is an interaction between upstream's PID-1 mount table read and *our* `hostPID: true`, which
+the agent needs for its health-monitoring mission and cannot drop.
+
+**Confirms pre-registered prediction PR6** (pressure/exploratory work finds ≥1 issue absent from
+upstream's tracker) — and it was found at 20 pods on an idle cluster, before any pressure testing.
+
+**Disposition:** must fix. This is exactly the class of defect this goal exists to catch, and the fix
+belongs in our layer since the cause is our pod spec. Candidate fixes to evaluate next:
+1. Add the per-pod mount paths to `--collector.filesystem.mount-points-exclude`. Cheap, but changes the
+   metric surface (needs a parity re-measure and a documented deviation).
+2. Ship the exclusion only for paths that are provably pod-ephemeral
+   (`/var/lib/kubelet/pods/.+`, `/run/containerd/.+/sandboxes/.+`), which upstream's own default
+   already gestures at with `var/lib/docker/.+` and `var/lib/containers/storage/.+` — i.e. this is
+   consistent with upstream intent, not a divergence from it.
+
+Option 2 looks right: upstream already excludes container-runtime scratch paths for exactly this
+reason, and simply has no entry for containerd-on-Kubernetes.
+
+**Next:** implement option 2, measure the parity impact, quantify the series reduction, and add a
+regression test.
+
+---
