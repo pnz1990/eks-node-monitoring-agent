@@ -160,17 +160,56 @@ func TestStartAndShutdown(t *testing.T) {
 	}
 }
 
-func TestStartListenError(t *testing.T) {
-	// Occupy a port, then ask the server to bind the same one.
+func TestStartOnAnOccupiedPortDegradesRatherThanFailing(t *testing.T) {
+	// The real-world case behind FINDING F-K4-1: another process already holds the
+	// configured port. On a customer node that is a node_exporter DaemonSet, and it
+	// used to panic the agent -- killing NodeCondition reporting, which is the one
+	// thing that must keep working.
+	//
+	// This occupies a port for real rather than injecting an error, so it exercises
+	// net.Listen's actual EADDRINUSE path.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer ln.Close()
 
 	srv := newTestServer(t, metrics.Options{Address: ln.Addr().String()})
 
-	err = srv.Start(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to listen")
+	require.NoError(t, srv.Start(context.Background()),
+		"a port conflict must degrade the metrics endpoint, not end the process that "+
+			"reports node health to Karpenter")
+}
+
+func TestStartSucceedsOnAFreePortAfterTheOccupiedCase(t *testing.T) {
+	// The negative control for the test above. If Start returned nil unconditionally
+	// -- say a future refactor swallowed every error -- the occupied-port test would
+	// still pass and prove nothing. This asserts the healthy path still genuinely
+	// binds and serves, so "nil" means "degraded deliberately" rather than "nil
+	// always".
+	srv := newTestServer(t, metrics.Options{Address: "127.0.0.1:0"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Start(ctx) }()
+
+	// Address() reports the bound port only once the listener exists, so polling it
+	// proves a real bind happened.
+	var addr string
+	for i := 0; i < 100; i++ {
+		addr = srv.Address()
+		if addr != "127.0.0.1:0" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	assert.NotEqual(t, "127.0.0.1:0", addr, "the server must actually bind a real port on the happy path")
+
+	cancel()
+	select {
+	case err := <-errCh:
+		assert.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("server did not shut down after context cancellation")
+	}
 }
 
 func TestNeedLeaderElection(t *testing.T) {

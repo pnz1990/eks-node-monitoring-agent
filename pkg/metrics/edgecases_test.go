@@ -160,24 +160,52 @@ func TestUnreadableProcfsFile(t *testing.T) {
 
 // --- configuration edge cases --------------------------------------------
 
-func TestInvalidListenAddresses(t *testing.T) {
+func TestInvalidListenAddressesFailAtConstruction(t *testing.T) {
+	// CONTRACT MOVED BY FINDING F-K4-1, and the move is the point.
+	//
+	// This used to assert that construction succeeded and Start returned the error.
+	// Start no longer returns bind errors — a port conflict must DEGRADE rather than
+	// panic the agent and take NodeCondition reporting down with it.
+	//
+	// But a MALFORMED address is a different thing from an occupied port: it can
+	// never succeed, no environment will fix it, and silently disabling the endpoint
+	// would mean a typo in values.yaml yields an agent that looks healthy and serves
+	// nothing. So it still fails loudly — just at CONSTRUCTION instead, where the
+	// distinction can be made without matching on error strings at runtime.
 	for _, addr := range []string{
-		"not-an-address",
+		"not-an-address",  // no port separator
 		"127.0.0.1:99999", // port out of range
-		"127.0.0.1:-1",
-		":::::",
+		"127.0.0.1:-1",    // negative port
+		":::::",           // too many separators
 	} {
 		t.Run(addr, func(t *testing.T) {
-			srv, err := metrics.NewServer(testLogger(), metrics.Options{
+			_, err := metrics.NewServer(testLogger(), metrics.Options{
 				Address:    addr,
 				Collectors: []string{"loadavg"},
 			})
-			// Construction succeeds because the address is not resolved until
-			// Start; Start must return an error rather than panicking.
-			require.NoError(t, err)
-			err = srv.Start(context.Background())
-			require.Error(t, err, "an invalid address must produce an error, not a panic")
-			assert.Contains(t, err.Error(), "failed to listen")
+			require.Error(t, err, "an unusable address must fail loudly at startup, not silently serve nothing")
+			assert.Contains(t, err.Error(), "invalid metrics address")
+		})
+	}
+}
+
+func TestValidListenAddressesAreAccepted(t *testing.T) {
+	// The negative control for the test above. Without it, a validateAddress that
+	// rejected EVERYTHING would satisfy the invalid-address test and break every
+	// real deployment.
+	for _, addr := range []string{
+		":9100",        // the chart default
+		"127.0.0.1:0",  // any free port, used throughout the tests
+		"0.0.0.0:9100", // explicit all-interfaces
+		"[::]:9100",    // IPv6 all-interfaces
+		"[::1]:9100",   // IPv6 loopback
+	} {
+		t.Run(addr, func(t *testing.T) {
+			_, err := metrics.NewServer(testLogger(), metrics.Options{
+				Address:    addr,
+				Collectors: []string{"loadavg"},
+			})
+			require.NoError(t, err, "a valid listen address must be accepted")
 		})
 	}
 }
