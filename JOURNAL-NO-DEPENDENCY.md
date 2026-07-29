@@ -305,3 +305,50 @@ independently.
 hardware that has them), then `stat`, `vmstat`, `filesystem`, `diskstats`, `netdev`.
 
 ---
+## [2026-07-29T04:05Z] N3 — cpu ported (3 of 39). The monotonicity cache is the real content.
+
+**Phase:** N3
+**Status:** confirmed
+
+**What I did:** Ported `cpu`. Upstream is 495 lines with 8 sub-collectors and 10 metric families; on EKS
+only 2 families produce data, so the scope is much smaller than the line count suggests. Verified
+against a live node first: PNE emits the same 2 families with `success=1`, so the sysfs-backed families
+(core/package throttles, frequency, flag/bug info, isolated, online, info) are absent hardware rather
+than a gap.
+
+**The part that mattered, and that a naive port would have dropped.**
+
+Upstream carries a per-CPU cache in `updateCPUStats` that looks like an optimisation and is actually
+correctness:
+
+- Kernel CPU counters can jump **backwards** — on CPU hotplug, and on some hypervisors.
+- A Prometheus counter that decreases makes `rate()` emit a spike or a gap.
+- So the cache only ever moves a counter forward, and separately resets a CPU's stats entirely if idle
+  regresses by `>= 3s`, on the assumption the CPU was hotplugged and its counters restarted.
+- Offline CPUs are deleted, or their stale series would be reported forever.
+
+**None of that is visible in a single scrape.** A port that dropped it would pass every unit test I
+would naturally have written and produce wrong graphs in production. I only found it by reading the code
+rather than the metric output — which is an argument for reading each collector's implementation rather
+than inferring behaviour from its emitted series.
+
+Ported faithfully, with one structural change: upstream writes the monotonicity check as ten
+near-identical `if` blocks; I expressed it as a table over field pointers so the rule is stated once.
+Behaviour is identical, and a table cannot develop a copy-paste inconsistency between fields the way ten
+blocks can. **`TestCPUStatFieldsCoversEveryEmittedMode` guards the coupling** — every emitted counter
+must also be covered by the monotonicity rule, or it could silently regress.
+
+**13 tests, focused on the invisible behaviour:** counter never decreases, normal advance, hotplug
+reset, small-jump-is-not-a-hotplug, the `>=` threshold boundary, offline CPU removal, new CPU addition,
+field-coverage coupling, multi-CPU series counts, guest toggle, and concurrent `Update` (the cache is
+shared mutable state and `Collect` runs collectors in parallel).
+
+**Gates:** coverage 100.0% · race clean · staticcheck clean.
+
+**Progress: 3 of 39** data-producing collectors (`loadavg`, `meminfo`, `cpu`).
+
+**Next:** `stat`, `vmstat`, `filesystem`, `diskstats`, `netdev`, `netclass`. `filesystem` and `netclass`
+are the two with known upstream defects (#1672, #1915/#1841), so those are where fixing rather than
+containing becomes possible.
+
+---
