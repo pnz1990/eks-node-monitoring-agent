@@ -57,11 +57,11 @@ func TestRegisterCollectorsVersionConflict(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	// Pre-register the same version collector to force the first failure branch.
-	require.NoError(t, registerCollectors(reg, nc))
+	require.NoError(t, registerCollectors(reg, nc, time.Second, quietLogger()))
 
-	err = registerCollectors(reg, nc)
+	err = registerCollectors(reg, nc, time.Second, quietLogger())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to register version collector")
+	assert.Contains(t, err.Error(), "duplicate metrics collector registration")
 }
 
 func TestRegisterCollectorsNodeCollectorConflict(t *testing.T) {
@@ -74,9 +74,9 @@ func TestRegisterCollectorsNodeCollectorConflict(t *testing.T) {
 	// next call but the node collector conflicts.
 	require.NoError(t, reg.Register(nc))
 
-	err = registerCollectors(reg, nc)
+	err = registerCollectors(reg, nc, time.Second, quietLogger())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to register node collector")
+	assert.Contains(t, err.Error(), "duplicate metrics collector registration")
 }
 
 func TestStartServeError(t *testing.T) {
@@ -165,6 +165,53 @@ func TestNewServerCollectorError(t *testing.T) {
 	assert.ErrorIs(t, err, sentinel)
 }
 
+// failOnNthRegisterer fails the Nth Register call, which makes each sequential
+// registration branch in registerCollectors independently reachable. The real
+// counters are package-level singletons, so a shared registry cannot exercise
+// the later branches: the first one always conflicts.
+type failOnNthRegisterer struct {
+	n    int
+	seen int
+	err  error
+}
+
+func (f *failOnNthRegisterer) Register(prometheus.Collector) error {
+	f.seen++
+	if f.seen == f.n {
+		return f.err
+	}
+	return nil
+}
+func (f *failOnNthRegisterer) MustRegister(...prometheus.Collector) {}
+func (f *failOnNthRegisterer) Unregister(prometheus.Collector) bool { return true }
+
+func TestRegisterCollectorsFailureBranches(t *testing.T) {
+	require.NoError(t, ResolveUpstreamFlags(nil))
+	nc, err := NewCollector(quietLogger(), "loadavg")
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name string
+		nth  int
+		want string
+	}{
+		{"panic counter", 1, "failed to register collector panic counter"},
+		{"timeout counter", 2, "failed to register collector timeout counter"},
+		{"version collector", 3, "failed to register version collector"},
+		{"node collector", 4, "failed to register node collector"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sentinel := errors.New("registration refused")
+			reg := &failOnNthRegisterer{n: tc.nth, err: sentinel}
+
+			err := registerCollectors(reg, nc, time.Second, quietLogger())
+			require.Error(t, err)
+			assert.ErrorIs(t, err, sentinel)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
 func TestNewServerRegisterError(t *testing.T) {
 	sentinel := errors.New("registration failed")
 	_, err := newServer(quietLogger(), Options{},
@@ -172,7 +219,7 @@ func TestNewServerRegisterError(t *testing.T) {
 		func(*slog.Logger, ...string) (*collector.NodeCollector, error) {
 			return &collector.NodeCollector{Collectors: nil}, nil
 		},
-		func(prometheus.Registerer, *collector.NodeCollector) error { return sentinel },
+		func(prometheus.Registerer, *collector.NodeCollector, time.Duration, *slog.Logger) error { return sentinel },
 	)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, sentinel)

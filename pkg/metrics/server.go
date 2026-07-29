@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -49,6 +50,10 @@ type Options struct {
 	UpstreamArgs []string
 	// HostRoot is the mount point of the host filesystem, typically "/host".
 	HostRoot string
+	// CollectorTimeout bounds a single collector's Update call. Zero selects the
+	// default; negative disables the bound and restores upstream's unbounded
+	// behaviour.
+	CollectorTimeout time.Duration
 }
 
 // withDefaults returns a copy of o with unset fields populated.
@@ -76,7 +81,11 @@ type Server struct {
 	registry *prometheus.Registry
 	handler  http.Handler
 	server   *http.Server
-	// listener is retained so tests can discover the bound port when Address
+	// mu guards listener, which is written by Start and read concurrently by
+	// Address. Without it the two race, which the race detector flags for any
+	// caller polling Address() while the server is coming up.
+	mu sync.RWMutex
+	// listener is retained so callers can discover the bound port when Address
 	// uses port 0.
 	listener net.Listener
 	// listen is the socket-opening function, overridable in tests to exercise
@@ -105,7 +114,7 @@ type resolveFunc func(args []string) error
 
 type collectorFunc func(logger *slog.Logger, filters ...string) (*collector.NodeCollector, error)
 
-type registerFunc func(prometheus.Registerer, *collector.NodeCollector) error
+type registerFunc func(prometheus.Registerer, *collector.NodeCollector, time.Duration, *slog.Logger) error
 
 func newServer(logger *slog.Logger, opts Options, resolve resolveFunc, newCollector collectorFunc, register registerFunc) (*Server, error) {
 	opts = opts.withDefaults()
@@ -121,7 +130,7 @@ func newServer(logger *slog.Logger, opts Options, resolve resolveFunc, newCollec
 	}
 
 	registry := prometheus.NewRegistry()
-	if err := register(registry, nc); err != nil {
+	if err := register(registry, nc, opts.CollectorTimeout, logger); err != nil {
 		return nil, err
 	}
 
@@ -141,14 +150,24 @@ func newServer(logger *slog.Logger, opts Options, resolve resolveFunc, newCollec
 //
 // It is separate from NewServer so the failure paths are reachable in tests by
 // passing a registry that already holds a conflicting collector.
-func registerCollectors(reg prometheus.Registerer, nc *collector.NodeCollector) error {
+func registerCollectors(reg prometheus.Registerer, nc *collector.NodeCollector, timeout time.Duration, logger *slog.Logger) error {
+	// Panic and timeout counters are part of the resilience boundary; surfacing
+	// them makes a contained collector fault visible rather than silent.
+	if err := reg.Register(collectorPanicsTotal); err != nil {
+		return fmt.Errorf("failed to register collector panic counter: %w", err)
+	}
+	if err := reg.Register(collectorTimeoutsTotal); err != nil {
+		return fmt.Errorf("failed to register collector timeout counter: %w", err)
+	}
 	// node_exporter_build_info is part of the endpoint contract that dashboards
 	// and alerts depend on, so it is registered even though the agent has its
 	// own version metric elsewhere.
 	if err := reg.Register(versioncollector.NewCollector("node_exporter")); err != nil {
 		return fmt.Errorf("failed to register version collector: %w", err)
 	}
-	if err := reg.Register(nc); err != nil {
+	// The resilient wrapper replaces upstream's NodeCollector so a panicking or
+	// hanging collector cannot take the agent down. See resilience.go.
+	if err := reg.Register(newResilientCollector(nc, timeout, logger)); err != nil {
 		return fmt.Errorf("failed to register node collector: %w", err)
 	}
 	return nil
@@ -216,6 +235,8 @@ func (s *Server) Handler() http.Handler { return s.handler }
 // Address returns the address the server is bound to. Once Start has run with a
 // port of 0 this reports the actual chosen port.
 func (s *Server) Address() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.listener != nil {
 		return s.listener.Addr().String()
 	}
@@ -233,7 +254,9 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", s.opts.Address, err)
 	}
+	s.mu.Lock()
 	s.listener = listener
+	s.mu.Unlock()
 
 	s.server = &http.Server{
 		Handler: s.handler,

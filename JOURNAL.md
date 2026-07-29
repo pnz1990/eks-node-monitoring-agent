@@ -204,3 +204,59 @@ Implication for the design: the guard cannot live in the HTTP layer. It must wra
 (per-collector timeout), with tests that fail without the guard.
 
 ---
+## [2026-07-28T23:20Z] P1 complete — R1/R2 implemented; race detector found a real bug
+
+**Phase:** P1 resilience
+**Status:** fixed
+
+**What I did:** Implemented `pkg/metrics/resilience.go` — a `resilientCollector` that replaces
+upstream's `NodeCollector`, providing per-collector panic recovery (R1) and a per-collector timeout
+(R2, default 5s). Added `resilience_test.go`. Ran the race detector for the first time.
+
+**What I observed:**
+
+*Three bugs found in my own implementation while building it:*
+
+1. **Send on closed channel would panic unrecoverably.** An abandoned (timed-out) collector may keep
+   emitting after `Collect` returns, by which point the registry has closed `ch`. That send would panic
+   on the abandoned goroutine where nothing can recover — the timeout guard would have become a *new*
+   crash source. Fixed with a relay channel plus a `drain` goroutine.
+2. **Healthy metrics were silently dropped.** My first version closed `stopForwarding` on the success
+   path, but `Update` sends to `done` *before* the deferred `close(relay)` runs, so metrics still in
+   flight were cut off. Caught by `TestPanicIsContained` asserting the sibling collector's metric
+   survived. Fixed: success path waits on `<-forwarded` instead.
+3. **Defer ordering left the forwarder hung on panic.** The `return` inside the recover skipped
+   `close(relay)`. Fixed by registering `defer close(relay)` *first* so it runs last on unwind.
+
+*Race detector — a real production data race, never previously run:*
+```
+WARNING: DATA RACE
+Write at 0x... by goroutine 49: (*Server).Start()   server.go:250
+Previous read at 0x... by goroutine 50: (*Server).Address()  server.go:233
+```
+`Start()` writes `s.listener` while `Address()` reads it, unsynchronized. Any caller polling
+`Address()` during startup hits this. Fixed with a `sync.RWMutex`. **`go test -race` now clean.**
+
+*Verification after the changes:*
+| Check | Result |
+|---|---|
+| `pkg/metrics` coverage | **100.0%** of statements |
+| `go test -race ./pkg/metrics/...` | **clean** |
+| Full suite | 34 packages ok, 0 FAIL |
+| **Parity vs upstream** | **298 names / 298 series shapes, empty diff** |
+
+**Conclusion:** R1 and R2 are in place and the resilience layer does **not** change the metric output —
+parity is byte-identical after the change, which was the main risk of wrapping the collector path.
+
+The three self-inflicted bugs are worth noting as a pattern: every one was in the *concurrency* of the
+guard, not its logic. A panic/timeout guard that mishandles channel lifetime is more dangerous than no
+guard, because it converts a contained failure into an unrecoverable one. The tests that caught them
+(sibling-metric survival, blocked-send detach) are the ones worth keeping green.
+
+**Not yet done for P1:** R3 (NodeCondition isolation under a wedged collector) needs a live cluster
+test, R4 (liveness independence) and R5 (cardinality/OOM bound) still open.
+
+**Next:** R3/R4/R5, then P2 upstream bug triage — starting with #1841/#1915 netclass, since our
+defaults filter no interfaces at all (`netclassIgnoredDevices` default `^$`).
+
+---
