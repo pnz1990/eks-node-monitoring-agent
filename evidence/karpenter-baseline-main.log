@@ -1,0 +1,40 @@
+variant : main
+pool    : 5 node(s)
+agent DS: nma-main-agent
+
+=== AGENT PRESENCE (a node with no agent is unmonitored, not healthy) ===
+  192-168-14-177.us-west-2.compute.internal          Running
+  192-168-15-166.us-west-2.compute.internal          Running
+  192-168-2-185.us-west-2.compute.internal           Running
+  192-168-24-213.us-west-2.compute.internal          Running
+  192-168-9-225.us-west-2.compute.internal           Running
+
+=== NODE CONDITIONS (types = A1, values = A5) ===
+  extracted 40 condition line(s) from 5 node(s)
+  ContainerRuntimeReady      present on 5/5 node(s), 0 not-True
+  KernelReady                present on 5/5 node(s), 0 not-True
+  NetworkingReady            present on 5/5 node(s), 0 not-True
+  StorageReady               present on 5/5 node(s), 0 not-True
+  AcceleratedHardwareReady   absent (expected: no accelerator on this instance type)
+
+=== KARPENTER VIEW (A6: does Karpenter consider these nodes healthy?) ===
+  nma-main-8sxrx         Launched=True Registered=True Initialized=True ConsistentStateFound=True Consolidatable=True Ready=True 
+  nma-main-dcvtb         Launched=True Registered=True Initialized=True ConsistentStateFound=True Consolidatable=True Ready=True 
+  nma-main-hjtgs         Launched=True Registered=True Initialized=True Consolidatable=True ConsistentStateFound=True Ready=True 
+  nma-main-lxk5v         Launched=True Registered=True Initialized=True Consolidatable=True ConsistentStateFound=True Ready=True 
+  nma-main-x9btg         Launched=True Registered=True Initialized=True Consolidatable=True ConsistentStateFound=True Ready=True 
+
+=== AGENT HEALTH (B5 errors/panics, B6 restarts) ===
+  pods=5  restarts=0
+  ERROR/FATAL/panic log lines: 0
+
+=== NodeDiagnostic CRs (A7: none orphaned) ===
+  nodediagnostics=0  live nodes=11
+
+VERDICT[main]: contract intact -- the 4 required NMA condition types present and True
+                   on all 5 node(s); AcceleratedHardwareReady on 0/5
+                   (absent is expected without an accelerator). Karpenter sees every
+                   NodeClaim Ready. 0 restarts, 0 error/panic lines, 0 orphaned
+                   NodeDiagnostics.
+
+                   NOT tested here: repair EXECUTION. This is condition publication only.

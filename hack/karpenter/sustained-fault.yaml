@@ -1,0 +1,60 @@
+# Sustained fault injector — required by FINDING F-K1-1.
+#
+# WHY A LOOP AND NOT A SINGLE WRITE. K1's one-shot injection was detected in 16s, and then the
+# condition SELF-CLEARED back to True/NetworkingIsReady with no fault removal. Karpenter's
+# toleration for NetworkingReady=False is 30 MINUTES, so a condition that clears inside that
+# window never triggers a repair at all.
+#
+# That makes the one-shot injector able to test condition PUBLICATION but NOT repair EXECUTION.
+# Worse, it sets a trap: inject -> "detected" -> "no replacement" -> report the repair loop safe,
+# when in truth the condition had cleared and Karpenter was never given anything to act on.
+#
+# So the fault must be RE-ASSERTED faster than the monitor clears it. This writes the line every
+# 30s, which is 10x more often than the 5-minute interfaceMonitorPeriod, so the condition cannot
+# lapse between writes.
+#
+# APPLIED AS A JOB WITH A NODE PIN, not a DaemonSet: only the node under test must be affected. A
+# DaemonSet would make every node unhealthy at once, which would trip Karpenter's 20%-unhealthy
+# safety valve and SUPPRESS repair entirely (JOURNAL-KARPENTER.md K0.2) -- producing "no
+# replacement" for a reason that has nothing to do with the agent.
+#
+# LIFETIME is bounded by activeDeadlineSeconds so a forgotten injector cannot hold a node
+# unhealthy indefinitely and drive repeated replacements on a billed cluster.
+#
+# USAGE: substitute NODE_NAME, then apply. Delete the Job to stop re-asserting the fault; the
+# condition should then clear within 2 monitor periods (interfaceCacheTTL).
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sustained-ipamd-fault
+  namespace: default
+spec:
+  backoffLimit: 0
+  # 45 min: comfortably past Karpenter's 30-minute NetworkingReady toleration, plus node-launch
+  # time, so a repair has room to fire and be observed -- but bounded.
+  activeDeadlineSeconds: 2700
+  template:
+    metadata:
+      labels: {nma-fault: sustained-ipamd}
+    spec:
+      restartPolicy: Never
+      nodeName: NODE_NAME
+      tolerations: [{operator: Exists}]
+      containers:
+        - name: fault
+          image: public.ecr.aws/amazonlinux/amazonlinux:2023-minimal
+          securityContext: {privileged: true}
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              mkdir -p /host/var/log/aws-routed-eni
+              i=0
+              # 90 iterations x 30s = 45 min, matching activeDeadlineSeconds.
+              while [ $i -lt 90 ]; do
+                echo 'Unable to reach API Server' >> /host/var/log/aws-routed-eni/ipamd.log
+                i=$((i+1))
+                sleep 30
+              done
+          volumeMounts: [{name: host-root, mountPath: /host}]
+      volumes: [{name: host-root, hostPath: {path: /}}]
