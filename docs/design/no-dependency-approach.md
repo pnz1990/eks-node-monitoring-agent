@@ -197,7 +197,7 @@ that #1915 concerns.
 reproduce it** and that negative was recorded plainly as *"PR1 — did not reproduce"*. The
 prediction was correct; the earlier miss was a matter of churn *rate*, not of the reasoning
 being wrong. Two runs, one negative and one positive, is what the claim now rests on — so:
-reachable, demonstrated once in 11 samples, rate unknown.
+reachable, demonstrated once in 12 pressure samples, rate not established.
 
 **On the dependency branch, #3 can only be contained** (the resilience boundary catches the
 consequences); the collector still returns nothing. On the native branch it is **fixed at
@@ -342,7 +342,7 @@ Two scrapes seconds apart legitimately differ on every counter, so that needs a 
 and success-value agreement is strong evidence but not proof that every number matches.
 
 **Scale tested:** ~~2 nodes, 70 pods~~ — **closed 2026-07-29.** 6 nodes, peak **2,938
-concurrent pods**, 3,000 churn completions, 11 samples over ~25 min, all three variants
+concurrent pods**, 3,000 churn completions, 16 samples over ~38 min (12 loaded, 4 at rest, which show full recovery), all three variants
 co-resident and scraped in the same pass. The native branch held: 0 panics, 0 timeouts, 0
 restarts, constant collector-failure count. `evidence/q3-scale-test.md`.
 
@@ -358,7 +358,7 @@ results in `OPEN-QUESTIONS.md`.
   nma-dep, 9 on nma-nodep, 0 on pne**, incrementing once per scrape, so *every* scrape of both
   agents served a partial response for 13 hours. The name was present and the series count was
   right, so T1/T2/T3 could not see it. A `rate()`-window tier would have.
-- **#1915's failure *rate* is unknown.** Reproduced once in 11 samples, and *not* reproduced in
+- **#1915's failure *rate* is unknown.** Reproduced once in 12 pressure samples (and 0 of 4 at rest), and *not* reproduced in
   an earlier run at comparable scale. Reachability is established; frequency is not.
 - **`nma-dep` containing #1915 is not the same as fixing it.** Its `netclass` did not fail in
   this run, which is evidence and not a guarantee.

@@ -2137,7 +2137,7 @@ netlink backend, no per-device sysfs reads.
 
 **The earlier 2,888-pod run did not reproduce this**, and that negative was recorded plainly
 as "PR1 — did not reproduce". Both runs are kept visible: reachability established, **rate
-unknown** (1 of 11 samples).
+unknown** (1 of 12 pressure samples; 0 of 4 at rest).
 
 **Second finding:** pne restarted **8 times**; both agents **0**. Not OOM
 (`MemoryPressure=False`) — it failed its own 1s liveness probe. Mechanism measured: pne's
@@ -2196,3 +2196,27 @@ Q3 scale         2,938 pods peak, 3,000 churn completions, agents 0 restarts
 Q10 (the `cpu: 250m` default + unmanaged `GOMAXPROCS`), Q5 (resource envelope).
 
 ---
+
+## Addendum — the Q3 sampler completed (16 samples, not 11)
+
+The sampler was still running when I first analysed it, so the earlier writeup used 11 samples.
+All 16 are now in. Nothing reverses; two things sharpen.
+
+**The denominator was wrong and is corrected everywhere:** #1915 fired **1 of 12 pressure
+samples** (0 of 4 at rest), not 1 of 11.
+
+**It is not correlated with load level.** It fired at 2,434 pods and did *not* fire at the
+2,938-pod peak. That fits the mechanism — a race against interface teardown inside the
+listing→reading window is a matter of *timing*, not of how many pods exist. Worth stating,
+because "more pods → more likely" is the intuitive read and the data does not support it.
+
+**The 4 post-pressure samples are a genuinely new result:** series counts and wall times return
+to pre-pressure values on all three variants (pne 565–606 series / 0.0151s median; both agents
+likewise). So the degradation under churn is **transient load, not a leak or a wedged
+collector** — a distinction the loaded samples alone could not make. pne's 9th restart is
+timestamped `15:05:34Z`, during pressure; it has been up continuously since `15:10:43Z`.
+
+**Process note:** I analysed a background job's output while it was still running and wrote a
+number from it. The number was not wrong for the data I had, but the denominator was
+provisional and I did not label it as such. When a measurement is still in flight, either wait
+or say "so far".
