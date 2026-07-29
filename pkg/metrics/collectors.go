@@ -133,7 +133,40 @@ func HostPathArgs(hostRoot string) []string {
 // contain the failure these would prevent, strict parity is the better default
 // and the mitigations are left to operators. Both are documented with copyable
 // flags in docs/prometheus-node-exporter-parity.md.
-var eksCollectorDefaults = []string{}
+var eksCollectorDefaults = []string{
+	// Exclude per-pod ephemeral mounts from the filesystem collector.
+	//
+	// The collector reads PID 1's mount table (filesystem_linux.go:185). Because
+	// the agent runs with hostPID: true, PID 1 is the host's init and its mount
+	// namespace contains every per-pod mount on the node — which upstream
+	// node_exporter never sees, since it does not use hostPID. Measured on an
+	// idle 20-pod node: 17 filesystems reported versus upstream's 4, the extra 13
+	// being containerd sandbox shm and kubelet projected volumes.
+	//
+	// These mounts are per-pod, so the series count grows with pod density, and
+	// their paths embed unique pod UIDs and sandbox IDs. That is unbounded
+	// high-churn cardinality: every pod create/delete permanently adds a series
+	// for the retention window. It also makes aggregations such as
+	// sum(node_filesystem_size_bytes) disagree with upstream.
+	//
+	// This extends upstream's own intent rather than diverging from it: its
+	// default already excludes var/lib/docker/.+ and
+	// var/lib/containers/storage/.+ for the same reason, and simply has no entry
+	// for containerd-on-Kubernetes.
+	"--collector.filesystem.mount-points-exclude=" + eksExcludedMountPoints,
+}
+
+// eksExcludedMountPoints extends upstream's defMountPointsExcluded with the
+// per-pod paths a Kubernetes node creates. The leading alternatives are upstream's
+// defaults, repeated verbatim because supplying this flag replaces them rather
+// than appending.
+const eksExcludedMountPoints = `^/(dev|proc|run/credentials/.+|sys|var/lib/docker/.+|var/lib/containers/storage/.+` +
+	// containerd pod sandbox shm mounts: /run/containerd/.../sandboxes/<id>/shm
+	`|run/containerd/.+/sandboxes/.+` +
+	// kubelet per-pod volumes, including projected service-account tokens:
+	// /var/lib/kubelet/pods/<pod-uid>/volumes/...
+	`|var/lib/kubelet/pods/.+` +
+	`)($|/)`
 
 // eksIgnoredNetDevices matches interfaces belonging to pods or the CNI rather than
 // to node networking. Not applied by default (see eksCollectorDefaults); exported
@@ -156,3 +189,7 @@ func applyEKSDefaults(args []string) []string {
 // the parity-preserving invariant can be asserted without making the defaults
 // themselves part of the public API.
 func ApplyEKSDefaultsForTest(args []string) []string { return applyEKSDefaults(args) }
+
+// EKSExcludedMountPointsForTest exposes eksExcludedMountPoints to the external
+// test package so the exclusion regexp can be asserted against real mount paths.
+func EKSExcludedMountPointsForTest() string { return eksExcludedMountPoints }

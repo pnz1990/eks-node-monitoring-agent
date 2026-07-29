@@ -503,3 +503,59 @@ reason, and simply has no entry for containerd-on-Kubernetes.
 regression test.
 
 ---
+## [2026-07-29T01:55Z] FIXED: pod-scaling filesystem cardinality — verified on live cluster
+
+**Phase:** P4 fix
+**Status:** fixed
+
+**What I did:** Added `--collector.filesystem.mount-points-exclude` as the first EKS default, extending
+upstream's `defMountPointsExcluded` with the two per-pod path families. Measured parity, deployed to
+the live cluster, and verified.
+
+**The exclusion** (upstream's defaults repeated verbatim, since supplying the flag *replaces* rather
+than appends):
+```
+^/(dev|proc|run/credentials/.+|sys|var/lib/docker/.+|var/lib/containers/storage/.+
+  |run/containerd/.+/sandboxes/.+          <- containerd pod sandbox shm
+  |var/lib/kubelet/pods/.+                 <- kubelet per-pod volumes
+ )($|/)
+```
+
+**What I observed:**
+
+| Check | Before | After |
+|---|---|---|
+| Parity vs upstream | 298/298 | **298/298, empty diff** |
+| NMA filesystem series (live) | **17** | **8** |
+| PNE filesystem series (live) | 4 | 8 |
+| NMA pod-ephemeral series | **13** | **0** |
+| `pkg/metrics` coverage | 100.0% | **100.0%** |
+| `go test -race` | clean | **clean** |
+
+Both exporters now report **8** filesystem series with **zero** pod-ephemeral mounts. (Both moved from
+4→8 because the earlier snapshot was taken before Prometheus/Grafana were installed, which added real
+tmpfs mounts — the meaningful number is that the two now agree and the churning series are gone.)
+
+**Why this is parity-neutral:** the exclusion removes *series within* the `node_filesystem_*` families,
+not the families themselves. The harness compares metric names, types and label key sets, so 298/298
+holds. The removed series described mounts that only existed because of `hostPID`, which upstream never
+reports at all — so removing them moves us *toward* upstream's output, not away.
+
+**Tests added:**
+- `TestFilesystemExclusionCoversPodEphemeralMounts` — asserts real observed paths (actual pod UIDs and
+  sandbox IDs from the live node) are excluded, and that `/`, `/boot/efi`, `/run`, `/tmp`, `/var`,
+  `/var/lib/kubelet` are **kept**. The must-keep list is the important half: an over-broad regexp that
+  swallowed `/var/lib/kubelet` would hide a real disk-full condition.
+- `TestEKSDefaultsAreParityNeutral` — replaced the earlier "defaults must be empty" invariant with an
+  allowlist plus the recorded measurement for each rejected candidate. The old test did its job: it
+  failed the moment I added this default and forced a parity re-measure before proceeding.
+
+**Note on the invariant test working as designed:** `TestEKSDefaultsAreEmptyToPreserveParity` failed
+immediately when I added the flag. That is the intended behaviour — it stopped me shipping a default
+without re-running the parity harness. Replacing it with a reasoned allowlist keeps the guard while
+permitting a measured exception.
+
+**Next:** #2799 nfsd on kernel 6.18 (we run far newer than the 6.6-rc1 in the report), then remaining
+LOW bugs, then P3 scale/pressure testing.
+
+---

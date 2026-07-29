@@ -2,6 +2,8 @@ package metrics_test
 
 import (
 	"io"
+	"regexp"
+	"strings"
 	"log/slog"
 	"testing"
 
@@ -140,13 +142,66 @@ func TestApplyEKSDefaultsPreservesOperatorPrecedence(t *testing.T) {
 		"operator flags must be last so they win")
 }
 
-func TestEKSDefaultsAreEmptyToPreserveParity(t *testing.T) {
-	// Guards a deliberate decision: two candidate defaults were measured and both
-	// changed the metric surface (netclass exclusion loses
-	// node_network_speed_bytes; netclass netlink adds node_network_altnames_info).
-	// The resilience layer already contains the failure they would mitigate, so
-	// strict parity wins. Adding a default here without re-running
-	// hack/parity-test.sh would regress parity silently.
-	assert.Empty(t, metrics.ApplyEKSDefaultsForTest(nil),
-		"adding an EKS default changes the metric surface; re-run hack/parity-test.sh and update docs/parity-exceptions.md")
+func TestEKSDefaultsAreParityNeutral(t *testing.T) {
+	// Each EKS default must be parity-neutral: it may change WHICH series appear
+	// within a family, but must never add or remove a metric family. Verified
+	// against upstream by hack/parity-test.sh (298/298 with these defaults).
+	//
+	// Two candidates were measured and REJECTED for failing this bar:
+	//   --collector.netclass.ignored-devices  -> 297 names (loses
+	//        node_network_speed_bytes; the only speed-reporting interfaces on an
+	//        EKS node are the pod-side eni* halves)
+	//   --collector.netclass.netlink          -> 299 names (adds
+	//        node_network_altnames_info)
+	//
+	// If you add a default here, re-run hack/parity-test.sh and record the result
+	// in docs/parity-exceptions.md before changing this list.
+	allowed := map[string]bool{
+		"--collector.filesystem.mount-points-exclude": true,
+	}
+	for _, arg := range metrics.ApplyEKSDefaultsForTest(nil) {
+		flag := arg
+		if i := strings.Index(arg, "="); i >= 0 {
+			flag = arg[:i]
+		}
+		assert.True(t, allowed[flag],
+			"EKS default %q is not in the reviewed allowlist; confirm it is parity-neutral with hack/parity-test.sh first", flag)
+	}
+}
+
+func TestFilesystemExclusionCoversPodEphemeralMounts(t *testing.T) {
+	// Regression test for the pod-scaling cardinality defect: the agent runs with
+	// hostPID, so the filesystem collector reads the host init mount namespace and
+	// sees every per-pod mount. Those paths embed unique pod UIDs and sandbox IDs,
+	// so leaving them in grows series count with pod density indefinitely.
+	rx := regexp.MustCompile(metrics.EKSExcludedMountPointsForTest())
+
+	mustExclude := []string{
+		"/var/lib/kubelet/pods/1b450692-be04-479e-a795-94a8ec472c20/volumes/kubernetes.io~projected/kube-api-access-r9psr",
+		"/run/containerd/io.containerd.grpc.v1.cri/sandboxes/20c938ab0c375c430150ca8ebbc45fd9371a5aaedb089de2beea68d1efb16e80/shm",
+		// upstream's own defaults must survive being replaced by ours
+		"/dev", "/proc", "/sys",
+		"/var/lib/docker/overlay2/abc",
+		"/var/lib/containers/storage/x",
+		"/run/credentials/systemd-sysctl.service",
+	}
+	for _, mp := range mustExclude {
+		assert.True(t, rx.MatchString(mp), "must exclude pod/runtime mount %q", mp)
+	}
+
+	mustKeep := []string{
+		"/", "/boot/efi", "/run", "/tmp", "/var", "/var/lib", "/var/lib/kubelet",
+		"/home", "/var/log",
+	}
+	for _, mp := range mustKeep {
+		assert.False(t, rx.MatchString(mp), "must NOT exclude real filesystem %q", mp)
+	}
+}
+
+func TestTestOnlyHelpersExposeInternals(t *testing.T) {
+	// The two ForTest helpers exist so the external test package can assert on
+	// internals without widening the real API. Cover them so the package stays at
+	// full statement coverage without a .covignore entry.
+	assert.NotEmpty(t, metrics.EKSExcludedMountPointsForTest())
+	assert.NotNil(t, metrics.ApplyEKSDefaultsForTest(nil))
 }
