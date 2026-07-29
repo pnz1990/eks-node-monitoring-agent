@@ -743,3 +743,50 @@ detector, a linter, or an adversarial input — not by reading code.
 "better than PNE" summary grounded in what P1–P5 actually measured.
 
 ---
+## [2026-07-29T01:50Z] P6 complete — final assessment written
+
+**Phase:** P6
+**Status:** confirmed
+
+**What I did:** Re-ran every gate, then wrote `evidence/production-readiness.md` answering the question
+the goal actually asked: is this better than PNE?
+
+**Final gate state:**
+```
+pkg/metrics coverage    100.0%   (.covignore unchanged)
+go test -race           clean
+staticcheck             clean
+gofmt / go vet          clean
+full suite              34 packages, 0 failures
+check-generate          no drift
+helm lint               0 failed
+parity vs upstream      298/298, empty diff, exit 0
+live e2e (EKS 1.36)     3/3 pass
+```
+
+**The answer, stated as the data supports it:**
+- **output** — equivalent (that is the goal; a non-equivalent replacement is not a replacement)
+- **resilience** — better, tested, but the guard never fired in ~40 min at 2,888 pods, so it is
+  insurance against a documented failure class rather than a fix for something observed
+- **latency under load** — better, 0.138s vs 0.681s max collector duration
+- **memory** — worse, 65MB vs 23MB; bounded and non-leaking but a third of the 200Mi chart limit
+- **upstream bug exposure** — 10 of 12 non-applicable or refuted, 2 contained
+
+**Bugs found by this work: 9.** Every one found by *running* something (live cluster, race detector,
+linter, adversarial input, cross-exporter comparison), none by reading code. Plus three measurement
+errors of my own, recorded because the methodology is the reusable part: an unfilled `rate()` window, a
+comparison taken across a rollout, and a parity run against a stale port. The harness now refuses the
+third.
+
+**Recommendation recorded:** ready for upstream discussion, not ready to enable by default. Three
+prerequisites before recommending broadly — resolve the resource envelope with NMA owners (and ENO for
+Auto Mode), run memory-pressure and soak tests, and test Bottlerocket plus one accelerated instance type.
+
+**Eight blind spots named explicitly** rather than implied as passing: memory-pressure/OOM, disk-I/O
+saturation, GPU/Neuron, Bottlerocket, multi-hour soak, scrape-storm, live netclass churn reproduction,
+and Auto Mode.
+
+**Cost note:** the two pressure nodegroups were deleted after testing; the original 2-node group remains
+so the dashboards stay reachable.
+
+---
