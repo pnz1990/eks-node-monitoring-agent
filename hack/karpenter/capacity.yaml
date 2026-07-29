@@ -1,0 +1,115 @@
+# Minimum-capacity holders, one per variant pool.
+#
+# WHY THESE EXIST. Karpenter has no "minimum nodes" field -- capacity follows pods. But the repair
+# test needs >=5 nodes per pool, because Karpenter SKIPS repair when >20% of a pool is unhealthy
+# and one unhealthy node in a 2-node pool is 50% (JOURNAL-KARPENTER.md K0.2). So the floor is set
+# by pinning pods that cannot co-schedule.
+#
+# HOW THE ANTI-AFFINITY WORKS: podAntiAffinity with topologyKey kubernetes.io/hostname and
+# requiredDuringScheduling means no two replicas may share a node. 5 replicas therefore FORCE 5
+# nodes. A cpu request alone would not -- Karpenter would bin-pack them onto fewer, larger nodes,
+# and the pool would sit below the 20% threshold while looking correct.
+#
+# Each Deployment tolerates only ITS OWN pool's taint, so the three pools stay isolated and
+# "the same churn" holds across them.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hold-main
+  namespace: default
+spec:
+  replicas: 5
+  selector:
+    matchLabels: {app: hold-main}
+  template:
+    metadata:
+      labels: {app: hold-main, nma-hold: "true"}
+    spec:
+      terminationGracePeriodSeconds: 0
+      nodeSelector:
+        nma-variant: main
+      tolerations:
+        - key: nma-variant
+          operator: Equal
+          value: main
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: {app: hold-main}
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: pause
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.7
+          resources:
+            requests: {cpu: 100m, memory: 32Mi}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hold-dep
+  namespace: default
+spec:
+  replicas: 5
+  selector:
+    matchLabels: {app: hold-dep}
+  template:
+    metadata:
+      labels: {app: hold-dep, nma-hold: "true"}
+    spec:
+      terminationGracePeriodSeconds: 0
+      nodeSelector:
+        nma-variant: dep
+      tolerations:
+        - key: nma-variant
+          operator: Equal
+          value: dep
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: {app: hold-dep}
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: pause
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.7
+          resources:
+            requests: {cpu: 100m, memory: 32Mi}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hold-nodep
+  namespace: default
+spec:
+  replicas: 5
+  selector:
+    matchLabels: {app: hold-nodep}
+  template:
+    metadata:
+      labels: {app: hold-nodep, nma-hold: "true"}
+    spec:
+      terminationGracePeriodSeconds: 0
+      nodeSelector:
+        nma-variant: nodep
+      tolerations:
+        - key: nma-variant
+          operator: Equal
+          value: nodep
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: {app: hold-nodep}
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: pause
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.7
+          resources:
+            requests: {cpu: 100m, memory: 32Mi}

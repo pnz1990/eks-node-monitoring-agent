@@ -111,3 +111,112 @@ cannot be claimed for the other.
 
 A single end-to-end repair test therefore takes **~40 minutes**, and that is a floor set by
 Karpenter, not by the harness.
+
+---
+
+## K1 — Karpenter installed, NodePools live, Tier-D controls all pass
+
+**Date:** 2026-07-29 · **Status:** complete
+
+### K1.1 What was built
+
+```
+Karpenter        v1.14.0, kube-system, 1 replica, 0 errors
+feature gate     FEATURE_GATES=...,NodeRepair=true,...   (read from the Deployment env, not assumed)
+EC2NodeClass     nma-test        Ready=True (all 7 sub-conditions True)
+NodePools        nma-main / nma-dep / nma-nodep   Ready=True
+IAM              KarpenterController-nma-pne-parity-test (IRSA) + reused MNG node role
+discovery tags   3 public subnets + cluster SG tagged karpenter.sh/discovery
+```
+
+Manifests committed at `hack/karpenter/{nodepools,capacity}.yaml`, harness at
+`hack/karpenter/inject.sh`. **No existing resource was deleted** — the MNG and its 6 nodes are
+untouched, so the metrics evidence stays reproducible.
+
+### K1.2 Five setup defects, each found by a check that failed loudly
+
+Recorded because they are the reproducibility notes someone re-running this will need:
+
+1. **OIDC provider was never registered in IAM.** The trust policy referenced
+   `oidc.eks.us-west-2.amazonaws.com/id/81F0AB31…`, but IAM only had a *different cluster's*
+   provider (`…F26250E3…`). Karpenter crash-looped with `InvalidIdentityToken`. Created the
+   provider with the correct thumbprint.
+2. **`iam:ListInstanceProfiles` missing** → instanceprofile GC reconcile errors every few seconds.
+3. **`ec2:CreateLaunchTemplate` missing** → `ValidationSucceeded=False`.
+4. **`ec2:CreateFleet` blocked by over-scoped conditions** → same. The dry-run auth check cannot
+   satisfy resource-scoped conditions, so a widened statement was added *for this test cluster*.
+5. **Validation is cached.** After fixing (3) and (4) the nodeclass stayed `False` until the
+   controller was restarted. Worth knowing: **an IAM fix is not picked up without a bounce**, and
+   a reader could easily conclude the policy was still wrong.
+
+### K1.3 A defect in my own topology, caught before it corrupted every result
+
+Both existing DaemonSets carry `tolerations: [{operator: Exists}]` and no pool selector — so they
+scheduled onto **every** pool, and **both run the same `q9-v1` image**. Measured directly:
+
+```
+pool=main:  ip-…-14-177  agents=2      <- two agents, same image, on the "baseline" pool
+            ip-…-15-166  agents=2
+            (all 5 nodes)
+```
+
+**That would have made all three pools identical**, and every A1–A7 comparison would have been the
+same binary against itself — the exact "comparing the same code against itself" trap the metrics
+harness has a positive control for. Fixed by pinning each DaemonSet to its own pool via
+`nodeSelector: {nma-variant: …}` plus a matching single toleration, and by building a **genuine
+stock-`main` image** (`stock-main`, digest `sha256:7f4c51ca…`, verified present in ECR rather than
+trusted from the build exit code).
+
+Stock main needed its own ConfigMap: the shared one contains a `metrics:` block that `main` cannot
+parse, and its `hostPort` was dropped since `main` has no metrics endpoint.
+
+### K1.4 Pool sizing works as designed
+
+`podAntiAffinity` on `kubernetes.io/hostname` with 5 replicas **forces 5 nodes** rather than letting
+Karpenter bin-pack onto fewer. Confirmed: 5 `NodeClaims`, all `Ready`, in **~90 s**. A CPU request
+alone would have produced 2 large nodes and silently left the pool above the 20 % unhealthy
+threshold (K0.2).
+
+### K1.5 Tier D — all five controls pass
+
+| ID | Control | Required | Observed |
+|---|---|---|---|
+| **D1** | inject `IPAMDNotReady` on stock `main` | condition appears | **DETECTED in 16 s** (`NetworkingReady=False/IPAMDNotReady`) |
+| **D2** | agent removed, then inject | condition must **not** appear | **not present after 180 s** (11× the D1 latency) |
+| **D3** | assert a condition never injected | must not be found | `StorageReady=True/DiskIsReady` |
+| **D4** | broken kubeconfig | must **error loudly** | `FAIL: node … not found (or credentials are dead)` |
+| **D5** | node with no agent | must report **missing** | `FAIL: no NMA agent Running … nothing would detect the fault` |
+
+**D2 is the one that makes D1 meaningful.** Without it, "the condition appeared" could have been
+ambient — something else setting `NetworkingReady`. It did not appear with the agent gone, so
+detection is attributable to NMA.
+
+**Observed detection latency 16 s**, far inside the 6-minute deadline. That is expected for a
+log-scanned reason: `IPAMDNotReady` does not need the two-adjacent-period agreement that
+`InterfaceNotUp` does.
+
+### K1.6 FINDING F-K1-1 — the injected Fatal SELF-CLEARED, so no repair would fire
+
+Not something the goal file anticipated. After D1 detected `NetworkingReady=False/IPAMDNotReady`,
+the condition returned to `True/NetworkingIsReady` **on its own**, with no fault removal:
+
+```
+after D1  : NetworkingReady=False/IPAMDNotReady   (16 s)
+~15 min later: NetworkingReady=True/NetworkingIsReady   on all 5 main-pool nodes
+```
+
+**Why this matters for the headline claim.** Karpenter's toleration for `NetworkingReady=False` is
+**30 minutes**. A condition that clears well inside that window **never triggers a repair**. So:
+
+- **the single-log-line injection is sufficient to test condition PUBLICATION (Tier A1–A4)**
+- **it is NOT sufficient to test repair EXECUTION (A3/A5/A6 end-to-end)** — the fault must be made
+  *persistent* so the condition stays false for >30 minutes
+
+This is exactly the trap K0.2 warned about in the other direction: a test could inject, observe
+"detected", observe "no replacement", and report the repair loop as safe — when in fact the
+condition had cleared and Karpenter was never given anything to act on.
+
+**Action for K2:** the repair-path test needs a **sustained** fault — a looping writer that appends
+the line every monitor period — and must assert the condition is *continuously* false for >30 min
+before claiming anything about replacement. Recorded as a required harness change rather than a
+finding about either fork.

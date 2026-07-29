@@ -1,0 +1,187 @@
+# Karpenter NodePools for the three-variant comparison (K1).
+#
+# WHY THREE POOLS RATHER THAN THREE CLUSTERS: the three variants must experience the SAME
+# Karpenter controller and the SAME churn, or a measured difference cannot be attributed to the
+# agent. Three clusters would triple cost and make "the same churn" unprovable. This is the same
+# same-node/same-pass discipline that made the metrics comparison trustworthy.
+#
+# WHY NOT ALL THREE AGENTS ON ONE NODE: hostPort 9100 collides (hazard H1), and H1 is itself under
+# test. Separate pools give shared conditions with isolated ports.
+#
+# ---------------------------------------------------------------------------------------------
+# POOL SIZING IS LOAD-BEARING -- see JOURNAL-KARPENTER.md K0.2
+# ---------------------------------------------------------------------------------------------
+# Karpenter SKIPS node repair when more than 20% of a NodePool is unhealthy. With a 2-node pool,
+# one unhealthy node is 50% -> repair is SUPPRESSED, and the test would report "no replacement
+# occurred" which reads exactly like "no spurious repair". The harness could not have observed a
+# repair either way.
+#
+# So repair-loop pools need >=5 nodes so that ONE unhealthy node is <=20%. That is enforced here
+# by a minimum-capacity Deployment per pool (see stress workloads), not by the NodePool itself --
+# Karpenter has no "minimum nodes" field; capacity follows pods.
+#
+# CONSOLIDATION IS THE CHURN DRIVER for hazard H2 (veth churn vs Fatal InterfaceNotUp), so
+# consolidateAfter is deliberately short. That is the point of the test, not an oversight.
+
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: nma-test
+spec:
+  # Reuses the existing MNG node role: it already has AmazonEKSWorkerNodePolicy,
+  # AmazonEKS_CNI_Policy and an EKS access entry, so Karpenter nodes join without
+  # aws-auth edits. Creating a second role would add a failure mode unrelated to
+  # what is being tested.
+  instanceProfile: KarpenterNodeInstanceProfile-nma-pne-parity-test
+
+  # Pinned AMI alias rather than @latest. An AMI changing mid-run would make results
+  # non-reproducible and could induce drift-based replacement that looks like a repair.
+  amiSelectorTerms:
+    - alias: al2023@latest
+
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: nma-pne-parity-test
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: nma-pne-parity-test
+
+  # 20Gi is enough for the agent + test workloads and keeps launches fast.
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 20Gi
+        volumeType: gp3
+        deleteOnTermination: true
+
+  tags:
+    nma-karpenter-test: "true"
+
+---
+# ============================================================================================
+# POOL 1: stock main -- THE BASELINE. Run first (K2). A finding that reproduces here is
+# PRE-EXISTING and must not be attributed to either fork.
+# ============================================================================================
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: nma-main
+spec:
+  template:
+    metadata:
+      labels:
+        nma-variant: main
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: nma-test
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]        # not spot: a spot reclaim would confound a repair event
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["t3.large"]         # one type, for reproducibility and to match the MNG baseline
+      # Taint so ONLY workloads that opt in land here. Without this, the three pools would
+      # compete for the same pods and "the same churn" would not hold.
+      taints:
+        - key: nma-variant
+          value: main
+          effect: NoSchedule
+      expireAfter: 720h
+  limits:
+    cpu: 40                            # ~10 x t3.large; bounds cost if a loop misbehaves
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m               # aggressive on purpose: this is the H2 churn driver
+
+---
+# ============================================================================================
+# POOL 2: dependency fork
+# ============================================================================================
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: nma-dep
+spec:
+  template:
+    metadata:
+      labels:
+        nma-variant: dep
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: nma-test
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["t3.large"]
+      taints:
+        - key: nma-variant
+          value: dep
+          effect: NoSchedule
+      expireAfter: 720h
+  limits:
+    cpu: 40
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m
+
+---
+# ============================================================================================
+# POOL 3: no-dependency (native) fork
+# ============================================================================================
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: nma-nodep
+spec:
+  template:
+    metadata:
+      labels:
+        nma-variant: nodep
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: nma-test
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["t3.large"]
+      taints:
+        - key: nma-variant
+          value: nodep
+          effect: NoSchedule
+      expireAfter: 720h
+  limits:
+    cpu: 40
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m
