@@ -503,3 +503,86 @@ against a loosely-specified artifact.** The pattern is clear enough to watch for
 **Next:** `diskstats`, then `netclass` (#1915/#1841 — the all-or-nothing device read).
 
 ---
+## N3 — `netclass`: fixing upstream #1915 / #1841 at the cause
+
+The third and most consequential "fix rather than contain" instance on this branch.
+
+Upstream's `getNetClassInfo` enumerates `/sys/class/net`, then reads each device:
+
+```go
+for _, device := range netDevices {
+    interfaceClass, err := c.fs.NetClassByIface(device)
+    if err != nil {
+        return netClass, err     // <-- ONE bad device discards EVERYTHING
+    }
+    netClass[device] = *interfaceClass
+}
+```
+
+A device present at *listing* time and gone at *read* time makes the collector emit **nothing** — not
+partial data. Every interface on the node loses its metrics because one veth vanished.
+
+**Why this has been open since 2020 upstream and matters here.** On a static host, interfaces
+essentially never disappear, so the listing-to-read window is almost never hit. On EKS, the VPC CNI
+creates and destroys veth and eni interfaces on *every pod schedule*, so the window is hit routinely
+rather than rarely. Same code, different failure rate — which is why it reads as a low-priority
+upstream issue and a real one for this use case.
+
+**The fix:** skip the unreadable device, log at debug, keep going. No readable devices at all returns
+`ErrNoData` (genuinely nothing to report); an unreadable `class/net` returns an error (could not look).
+Those are different conditions and `TestNetClassEnumerationFailureIsWrapped` asserts the second is
+*not* `ErrNoData`, so a future refactor cannot quietly collapse "collection broke" into "no data".
+
+**This also retires an EKS workaround.** On the dependency branch I considered excluding pod-side
+interfaces via `--collector.netclass.ignored-devices` to dodge the churn hazard, and measured that it
+*costs* `node_network_speed_bytes` — 297 metric names versus upstream's 298, because on that node
+every remaining interface reported an invalid speed. With the read fixed at its cause, the exclusion is
+unnecessary: the default stays upstream's `^$` (matches nothing) and the filter exists only as a seam.
+Fixing the bug was strictly better than not looking.
+
+**Regression test.** `TestNetClassSkipsUnreadableDevice` builds a fake `/sys/class/net` with three
+devices, then makes one unreadable while its directory entry still lists — the exact
+listing-then-read race. Upstream returns 0 of 3 here; we must return the 2 readable ones. Verified it
+fails against upstream's logic before it passes against ours, so it is a real negative control and not
+a test that cannot fail.
+
+**Two things verified mechanically rather than by eye**, because both are invisible to the three-way
+harness:
+
+```
+field set:        upstream 17, ours 17, IDENTICAL: True (no missing, no extra)
+ignored-devices:  upstream default "^$" == ours, verbatim
+```
+
+A missing field silently drops a metric; an extra one emits a metric upstream lacks. Neither shows up
+in a name-only review.
+
+**`adminState` rewrite, proven equivalent rather than assumed.** Upstream writes
+`*flags & int64(net.FlagUp) == 1`, which only works because `net.FlagUp` happens to be 1 — it is a
+test of bit 0 dressed up as a flag comparison. Mine is `*flags&0x01 != 0`. Rather than reason about
+it, I ran both forms over real interface flag values (0, 1, 2, 3, 0x1002, 0x1003) in a standalone
+program: identical on every input. Also `nil` flags → `"unknown"`, not `"down"`: a kernel that did not
+report flags has not told us the interface is down.
+
+**A fourth instance of my own recurring test bug.** `TestNetClassDefaultFilterIsUpstreamVerbatim`
+extracted `netclassIgnoredDevices[^"]*"([^"]*)"` from upstream's source — which captured the flag
+*name*, `collector.netclass.ignored-devices`, not the default `^$`. Fixed by anchoring on the
+`.Default("...")` call. **Fourth time a test of mine failed because I asserted against a
+loosely-specified artifact** (file doc comment instead of code; no-match case of a match-only bug;
+`multicast_total` as a substring; now a regexp that matched the wrong string literal). Every one was
+caught by the test failing rather than by review — which is the argument for these mechanical
+upstream-diff tests existing at all, but the pattern is frequent enough that I now write the extraction
+regexp anchored to the syntax I actually want, not to proximity.
+
+**Gates:** coverage 100.0% (all four initially-uncovered branches closed with injected seams, `.covignore`
+untouched) · race clean · vet clean · staticcheck clean · 113 tests in the package.
+
+**Progress: 8 of 39** — `loadavg`, `meminfo`, `cpu`, `vmstat`, `stat`, `filesystem`, `netdev`, `netclass`.
+
+All three upstream open bugs that were *containable* on the dependency branch are now *fixed* at the
+cause on this one: the filesystem data race, the vmstat malformed-line panic, and netclass #1915/#1841.
+
+**Next:** `diskstats`, then the `/proc/net` group (`netstat`, `sockstat`, `softnet`, `udp_queues`, `arp`,
+`conntrack`).
+
+---
