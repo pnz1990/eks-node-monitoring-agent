@@ -152,3 +152,55 @@ genuine improvement over PNE, not a catch-up.
 demonstrated to fail without the guard.
 
 ---
+## [2026-07-28T22:25Z] R1 root cause proven — panic in collector goroutine is unrecoverable
+
+**Phase:** pressure (P1)
+**Status:** confirmed
+
+**What I did:** Inspected upstream's collection path, then built two minimal reproductions to
+distinguish which panics are contained and which are fatal.
+
+```bash
+grep -n "recover()" node_exporter/collector/collector.go   # -> NO MATCHES
+sed -n '145,178p' node_exporter/collector/collector.go     # Collect() + execute()
+```
+
+**What I observed:**
+
+Upstream `NodeCollector.Collect` (`collector/collector.go:145-157`) fans every collector out to its own
+goroutine and calls `execute()`, which invokes `c.Update(ch)` bare:
+
+```go
+for name, c := range n.Collectors {
+    go func(name string, c Collector) {      // collector.go:150
+        execute(name, c, ch, n.logger)
+        wg.Done()
+    }(name, c)
+}
+```
+There is **no `recover()` anywhere in the file**, and no timeout.
+
+Two reproductions, same panic, opposite outcomes:
+
+| Panic location | Result |
+|---|---|
+| Inside `Collect()` on the calling goroutine | **Contained.** `promhttp` recovers → HTTP 500, process survives. Verified: `REACHED: process survived, status = 500` |
+| Inside a goroutine spawned by `Collect()` (**what upstream does**) | **FATAL.** Process dies. Verified: `panic: collector exploded in its own goroutine` + stack, non-zero exit |
+
+**Correction to my own earlier assumption:** I had assumed any collector panic would crash the process.
+That is wrong — `promhttp` does recover panics on the request goroutine. The fatal case is specifically
+the *spawned* goroutine, which is precisely the path upstream uses for every collector. So the risk is
+real but narrower and better understood than I first stated.
+
+**Conclusion:** R1 is justified by a reproducible fact. Because upstream fans out to goroutines with no
+recover, a single panicking collector (#1007 supervisord, #3346 SIGSEGV, #1987 textfile) terminates the
+*entire agent process* — taking `NodeCondition` reporting and EKS node auto repair signalling with it.
+`promhttp`'s recovery does not help because the HTTP handler is not on the panicking stack.
+
+Implication for the design: the guard cannot live in the HTTP layer. It must wrap each collector's
+`Update` call so the `recover()` is on the same goroutine as the panic.
+
+**Next:** implement `pkg/metrics` collector wrapper providing R1 (per-collector recover) and R2
+(per-collector timeout), with tests that fail without the guard.
+
+---
