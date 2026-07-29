@@ -423,3 +423,44 @@ is two *different* failures:
 | — | **F-K4-5:** `[::]` vs `[HOST_IP]` → both bind, PNE wins traffic, agent silently unreachable |
 
 Neither was anticipated. Both are recorded rather than reshaped to fit the prediction.
+
+### K4.7 F-K4-1 FIXED and verified live
+
+Fixed in `1abd337`, image `fk4-fix` (`sha256:44833c89`), then **verified against the exact scenario
+that previously produced 5/5 CrashLoopBackOff**:
+
+```
+before fix : 5/5 CrashLoopBackOff, panic: failed to listen on :9102: bind: address already in use
+after  fix : 5/5 Running, 0 restarts, 0 panic lines
+             ERROR logged with cause AND remediation hint
+             "reported node conditions" present; NetworkingReady=True/NetworkingIsReady
+```
+
+The last line is the point: **the agent keeps doing its actual job with an unusable metrics port.**
+
+**The fix splits two failures that were conflated**, because collapsing them would trade one bad
+outcome for another:
+
+- **port in use** → environmental. Log at ERROR with a hint, disable the endpoint for the process
+  lifetime, `return nil`, keep the monitors running.
+- **malformed address** (`not-an-address`, port 99999) → operator config error. It can never
+  succeed, so silently disabling would let a `values.yaml` typo produce an agent that looks healthy
+  and serves nothing. Still fails loudly, now at **construction** via `validateAddress`.
+
+Split by *when* the failure is detected rather than by inspecting error strings at runtime, which
+would be brittle across Go versions and platforms.
+
+**Two of my own test-setup errors on the way, both recorded because they cost time:**
+
+1. First verification attempt used `containerPort/hostPort: 9100`, but the agent reads its address
+   from the **mounted ConfigMap** — so it collided with the wrong port. The container port is
+   irrelevant to what the process binds.
+2. Second attempt reused the `nma-nodep` ConfigMap, which contains `implementation: native` — a
+   field that exists **only on the native branch**, while `fk4-fix` was built from the dependency
+   branch. Result: `panic: parsing monitor config: unknown field "implementation"`. A *different*
+   panic that briefly looked like the fix had failed. **Worth noting as a real finding in itself:
+   an unknown config field is a hard panic**, which means a config written for one branch crash-loops
+   the other.
+
+**Applies to both forks** — the panic was in shared `main.go`/`pkg/metrics` code. The fix is on the
+dependency branch and must be carried to native.
