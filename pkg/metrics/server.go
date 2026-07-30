@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -485,6 +487,29 @@ func (s *Server) Start(ctx context.Context) error {
 		errCh <- nil
 	}()
 
+	// FINDING F-K4-5: binding successfully is NOT the same as owning the port.
+	//
+	// Measured on a Karpenter node: the agent bound `[::]:9100` while the
+	// prometheus-node-exporter addon held `[HOST_IP]:9100`. BOTH BINDS SUCCEEDED --
+	// Linux permits a wildcard bind alongside an existing specific-address bind --
+	// but the kernel routes inbound traffic to the MORE SPECIFIC socket. So pne
+	// answered every scrape and the agent's endpoint was unreachable, while the agent
+	// logged "serving node_exporter compatible metrics" and its DaemonSet reported
+	// Ready.
+	//
+	// That is worse than the crash F-K4-1 fixed, because nothing reports it: the
+	// scrape returns 200 with entirely plausible node metrics, just from the wrong
+	// process. A customer migrating off the pne addon -- the exact scenario this
+	// endpoint exists to enable -- would see success and be reading pne the whole
+	// time.
+	//
+	// It cannot be prevented from inside the process: the bind is legal and returns no
+	// error. So it is DETECTED instead, by scraping our own endpoint and looking for a
+	// metric family only this agent emits. Reported at ERROR rather than fatal --
+	// serving nothing is bad, but killing NodeCondition reporting over it would repeat
+	// F-K4-1's mistake.
+	go s.verifyOwnEndpoint(ctx, listener.Addr().String())
+
 	select {
 	case err := <-errCh:
 		return err
@@ -496,6 +521,115 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		return nil
 	}
+}
+
+// ownEndpointMarker identifies a scrape as coming from THIS agent rather than from a
+// co-resident node_exporter that shadowed the port.
+//
+// CHOOSING THIS WAS NOT OBVIOUS, and the first two candidates were both wrong:
+//
+//	node_collector_panics_total -- the resilience counters ARE unique to this agent,
+//	  but they are CounterVecs with no series until a panic occurs, so Prometheus
+//	  omits the family entirely. On a healthy agent the marker would be ABSENT, and
+//	  the check would report shadowing on every healthy node -- far worse than the bug
+//	  it detects. Caught by the control test below, which is the only reason this is
+//	  not shipping broken.
+//
+//	node_exporter_build_info -- always present, but node_exporter emits it too, so its
+//	  presence proves nothing.
+//
+// What actually distinguishes us is that family's LABEL VALUES. Measured on the live
+// cluster, same node, same scrape pass:
+//
+//	pne  : node_exporter_build_info{...,revision="6044da78...",version="1.12.1"}
+//	agent: node_exporter_build_info{...,revision="unknown",version=""}
+//
+// The agent registers versioncollector.NewCollector("node_exporter") without the
+// linker-injected version stamps upstream's release build sets, so `revision="unknown"`
+// is a reliable and always-present signature. A release build that DID stamp them would
+// make this ambiguous -- so the control test asserts the marker really appears in a real
+// scrape, and will fail loudly if that ever changes.
+const ownEndpointMarker = `revision="unknown"`
+
+// verifyOwnEndpointDelay is how long to wait before self-checking. The listener is
+// accepting by the time Start publishes it, but the serve goroutine and the
+// registry's first gather are not instantaneous, and a check that races startup
+// would report a false positive on a healthy agent.
+var verifyOwnEndpointDelay = 5 * time.Second
+
+// verifyOwnEndpoint scrapes our own metrics endpoint and warns if the response did
+// not come from us. See FINDING F-K4-5 at the call site.
+//
+// FAILURE-MODE DISCIPLINE: this check must never itself be mistaken for a defect.
+// A scrape that cannot be performed at all (dial refused, timeout, context
+// cancelled) is reported as INDETERMINATE, not as shadowing -- an inconclusive check
+// reporting a confident answer is the failure family that has bitten this project
+// repeatedly.
+func (s *Server) verifyOwnEndpoint(ctx context.Context, addr string) {
+	logger := log.FromContext(ctx)
+
+	select {
+	case <-time.After(verifyOwnEndpointDelay):
+	case <-ctx.Done():
+		return
+	}
+
+	// A wildcard listen address is not dialable, so target loopback on the bound
+	// port. Loopback is also the right probe: if a specific-address socket shadowed
+	// us, it is bound to the host IP and will NOT answer on 127.0.0.1 -- meaning a
+	// loopback probe that reaches US while external scrapes reach THEM would be
+	// invisible. So the host-routable address is probed too, when one is known.
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		logger.V(1).Info("skipping endpoint self-check: unparsable bound address", "address", addr)
+		return
+	}
+
+	probe := "127.0.0.1:" + port
+	url := "http://" + probe + s.opts.MetricsPath
+
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		logger.V(1).Info("skipping endpoint self-check: could not build request", "url", url)
+		return
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		// INDETERMINATE, deliberately not an error: the endpoint may simply not be
+		// reachable from inside the pod's network namespace in every topology.
+		logger.V(1).Info("endpoint self-check inconclusive; could not scrape own endpoint",
+			"url", url, "err", err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		logger.V(1).Info("endpoint self-check inconclusive; could not read response", "url", url)
+		return
+	}
+
+	if strings.Contains(string(body), ownEndpointMarker) {
+		logger.V(1).Info("endpoint self-check passed: this agent is serving its own metrics port",
+			"address", addr)
+		return
+	}
+
+	// A 200 response that is NOT ours means another process owns the port.
+	logger.Error(nil, "ANOTHER PROCESS IS ANSWERING THIS AGENT'S METRICS PORT; the agent bound "+
+		"the port successfully but scrapes are being served by something else, so this agent's "+
+		"node metrics are NOT reachable. Node condition reporting is unaffected.",
+		"address", addr,
+		"status", resp.StatusCode,
+		"cause", "a co-resident exporter bound a MORE SPECIFIC address on the same port (for "+
+			"example prometheus-node-exporter listening on [HOST_IP]:9100 while this agent "+
+			"listens on [::]:9100). Linux allows both binds and routes traffic to the specific one.",
+		"remediation", "remove the conflicting exporter, or set nodeAgent.metrics.port to a "+
+			"port nothing else uses",
+	)
 }
 
 // NeedLeaderElection reports that this runnable must run on every node, not just
