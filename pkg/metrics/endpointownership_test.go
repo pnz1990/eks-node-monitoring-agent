@@ -204,3 +204,27 @@ func TestOwnEndpointMarkerIsActuallyServedByThisAgent(t *testing.T) {
 		"%s must appear in a real scrape, or the endpoint self-check would report shadowing on "+
 			"every healthy node", ownEndpointMarker)
 }
+
+func TestOwnEndpointMarkerIsAlsoServedByTheNativeImplementation(t *testing.T) {
+	// THE NATIVE-PATH CONTROL, and it exists because of what happened with F-K4-1: that fix's
+	// cherry-pick silently missed NewNativeServer, and only a native-SPECIFIC test caught it.
+	//
+	// The risk here is concrete rather than theoretical. NewNativeServer registers
+	// versioncollector.NewCollector("node_exporter") in its OWN code path, separately from
+	// registerCollectors. If that registration were ever dropped or changed, node_exporter_build_info
+	// would vanish from the native endpoint, the marker would be absent, and verifyOwnEndpoint would
+	// report shadowing on EVERY healthy native-mode node.
+	//
+	// So the marker is asserted against a real scrape of the native handler, not inherited from the
+	// upstream one.
+	srv, err := NewNativeServer(quietLogger(), Options{Address: "127.0.0.1:0", HostRoot: "/"})
+	require.NoError(t, err)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultMetricsPath, nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	assert.True(t, strings.Contains(rec.Body.String(), ownEndpointMarker),
+		"%s must appear in a real NATIVE scrape too, or the endpoint self-check would report "+
+			"shadowing on every healthy node running metrics.implementation=native", ownEndpointMarker)
+}
