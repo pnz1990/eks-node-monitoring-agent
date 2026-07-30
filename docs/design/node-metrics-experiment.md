@@ -10,6 +10,7 @@
 | **Validated on** | EKS 1.36, Amazon Linux 2023, kernel 6.18.38, 2 and 6 × t3.large, us-west-2 |
 | **Reference** | `prometheus/node_exporter` v1.12.1 (`b401dcfc`), deployed as the `prometheus-node-exporter` addon |
 | **Evidence** | `evidence/` (this branch and the native branch), `JOURNAL.md`, `JOURNAL-NO-DEPENDENCY.md` |
+| **Karpenter** | validated separately: `docs/design/karpenter-integration.md`, `JOURNAL-KARPENTER.md`. Two shared-code defects found, one a blocker — see §7.8. |
 
 ---
 
@@ -513,6 +514,8 @@ cannot distinguish "rare" from "unlucky sampling".**
 | `pb = *m` copies a `dto.Metric` containing a `sync.Mutex` | undefined | `go vet` |
 | **Duplicate `promhttp_metric_handler_errors_total` registration** | **every scrape partial** | live endpoint diff |
 | **`ErrorLog` unset** | 3,182 errors, zero log lines | the above |
+| **A metrics-port conflict panics the whole agent** | **BLOCKER — kills NodeCondition reporting** | Karpenter validation, §7.8 |
+| A `[::]` bind loses traffic to a `[HOST_IP]` bind | endpoint silently unreachable | Karpenter validation, §7.8 |
 
 ### 7.4 The Q9 defect, in detail — because of how it hid
 
@@ -607,6 +610,45 @@ Recorded because a doc that only lists successes is not a record.
   from inside the port."**
 - **"All 10 unported collectors report `success=0`"** — `bcache` reports `1` (§4.3).
 - **F-N7-1**, the ~250× performance finding (§6.3).
+- **Four more from the Karpenter validation**, listed in `docs/design/karpenter-integration.md` §4 —
+  including a termination I reported as unexplained that was caused by my own earlier injection, and
+  a condition I described as "self-clearing intermittently" that in fact only clears when the agent
+  process restarts (my reading was a side effect of a different bug I had not yet fixed).
+
+### 7.8 The Karpenter validation — two more defects, in *shared* code
+
+Everything above was measured on a **managed node group**. NMA exists to publish `NodeConditions`
+that EKS node auto repair acts on, and on Auto Mode that repair is executed by **Karpenter** — so the
+integration that matters most had never been exercised. It has now:
+**`docs/design/karpenter-integration.md`** (full report),
+`GOAL-KARPENTER-INTEGRATION.md`, `JOURNAL-KARPENTER.md`.
+
+**The headline is reassuring: neither fork changes NMA's observable behaviour toward Karpenter.**
+Identical condition type sets, detection latency identical *to the second* (main 15s / dep 15s /
+nodep 15s), zero spurious repairs across 1,200 pod-churn completions, and the repair loop confirmed
+end to end on all three variants.
+
+**But two defects turned up in code both forks share, and one is a blocker:**
+
+| | Finding | Severity |
+|---|---|---|
+| **F-K4-1** | A metrics-port bind conflict **panicked the entire agent** — `mgr.Add(metricsServer)` puts the listener under the controller-runtime manager, whose Runnable error becomes a panic via `utilruntime.Must(run())`. Measured: **5/5 CrashLoopBackOff**. It took down NodeCondition reporting, so Karpenter saw a node with no health signal. | **BLOCKER — fixed on both branches, verified live** |
+| **F-K4-5** | An agent on `:9100` beside a node_exporter does **not** collide: pne binds `[HOST_IP]:9100`, the agent binds `[::]:9100`, both succeed, and **pne receives the traffic**. The agent logs "serving metrics", the DaemonSet is Ready, the scrape returns 200 — from the wrong process. | **open — needs a decision** |
+
+**F-K4-1 is the exact inverse of §3.2's resilience boundary.** That boundary was built so a
+*collector* defect could never kill condition reporting, and it works. A **startup** bind failure
+bypassed it entirely — which is worth recording as a limit of that design, not just as a bug.
+
+**Why the MNG never found it:** these only surface when a pod starts on a node where the port is
+already taken, or restarts from scratch. Karpenter launches **fresh nodes constantly**; an MNG at
+steady state does not. The same mechanism exposed a latent probe-port mismatch in our own test
+DaemonSet that had been invisible for the entire metrics effort (`karpenter-integration.md` §3.3).
+
+**One pre-existing NMA finding, not attributable to either fork:** a log-triggered Fatal such as
+`IPAMDNotReady` has **no clearing path** — conditions are set `True` only at startup, so once
+observed it stays False until the agent restarts. With Karpenter in the loop that now means a
+*transient* IPAM-D blip permanently marks the node unhealthy and gets it forcefully replaced 30
+minutes later. Identical on stock `main`, which is what the baseline-first phase ordering was for.
 
 ---
 
@@ -691,16 +733,28 @@ every pod schedule" — and in the latter case owning the code is clearly correc
 
 1. **Raise #1915 upstream** with the regression test and the field reproduction. *Needs a
    go-ahead — a public post to a repository we do not own.*
-2. **Carry the §7.4 fixes into whichever branch ships.** They live in `pkg/metrics`, so they
-   apply to the dependency branch identically. Not optional cleanup: the endpoint was serving
-   partial responses.
-3. **Split the dependency branch into a clean PR.** Of 10,825 insertions only ~3,566 belong
+2. **Carry the §7.4 and §7.8 fixes into whichever branch ships.** They live in `pkg/metrics`, so
+   they apply to both branches identically. Not optional cleanup: the endpoint was serving partial
+   responses (§7.4), and **a port conflict was killing the whole agent (§7.8 / F-K4-1)**. Both are
+   already implemented and verified on **both** branches — but carrying F-K4-1 across is what
+   revealed that a cherry-pick can silently miss `NewNativeServer`, so verify per implementation
+   rather than assuming inheritance.
+3. **Decide F-K4-5** (§7.8) — the silently-unreachable endpoint. It is the worst-shaped failure in
+   this whole body of work, because *nothing reports it*: a migration that left the PNE addon
+   installed would look healthy and serve the wrong process's metrics. Recommend binding a specific
+   address, or detecting that the agent is not the process answering its own port. **This one is
+   directly on the critical path for "retire the PNE addon", since it only occurs when both are
+   installed — i.e. during exactly the migration this work exists to enable.**
+4. **Split the dependency branch into a clean PR.** Of 10,825 insertions only ~3,566 belong
    upstream; the rest are process artefacts. **`evidence/` contains an AWS account ID and Grafana
    credentials and must not be pushed to a public repository.**
-4. **Decide the `cpu: 250m` / `GOMAXPROCS` question (Q10).** Independent of this choice, affects
+5. **Decide the `cpu: 250m` / `GOMAXPROCS` question (Q10).** Independent of this choice, affects
    every EKS node, cheap to fix. Leaning: set `GOMAXPROCS` to match the quota, since the runtime
    currently schedules 2 threads into a 0.25-core budget.
-5. **Hold native.** Merge if upstream declines #1915, or when a second such defect justifies the
+6. **Raise F-K6-1 with the NMA owners** (§7.8) — a log-triggered Fatal never clears, so a transient
+   IPAM-D blip now costs the node. Pre-existing and not attributable to either fork, but Karpenter
+   gives it a consequence it did not previously have.
+7. **Hold native.** Merge if upstream declines #1915, or when a second such defect justifies the
    ownership cost.
 
 ### 9.2 One thing to decide either way
@@ -717,7 +771,9 @@ not have to answer. Whichever wins becomes the only one.
 **Well established:** the two implementations produce identical metric names, per-collector
 success values and series counts on live EKS nodes, at baseline, under pressure and at 2,938
 pods, with harnesses that self-test their ability to detect each class of difference and a
-positive control on a known-good pair.
+positive control on a known-good pair. **And, since the Karpenter validation (§7.8): identical
+`NodeCondition` type sets, identical Fatal-detection latency, no spurious repairs under churn, and
+the node-repair loop confirmed end to end on all three variants.**
 
 **Not established:**
 
@@ -732,6 +788,12 @@ positive control on a known-good pair.
   multi-day soak, no arm64 at scale.
 - **Wall time is measured client-side** from a pod on the same node, so it includes the kubelet
   network path. That is the honest cost of a Prometheus scrape but it is not pure collection time.
+- **Karpenter coverage is partial** (§7.8, full limits in `karpenter-integration.md` §5): only 5 of
+  NMA's 21 Fatal reasons are reachable without accelerator hardware; `InterfaceNotUp` was exercised
+  only *negatively* (churn failed to trigger it); two of the three repair durations are estimates
+  rather than measurements, because the node objects were deleted along with their transition
+  times; and it was one churn profile over ~40 minutes on one instance type. Node Auto Repair is
+  also still **alpha** in Karpenter, so its behaviour may change.
 - **Q5 (resource envelope) is unresolved:** nma-dep sits at ~65MB steady versus PNE's ~23MB.
   Confirmed bounded rather than a leak, but on Auto Mode it feeds `EKSTachyonAMIOverhead` →
   Karpenter bin-packing → customer allocatable, and needs a position from the NMA owners.
