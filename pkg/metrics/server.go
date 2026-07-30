@@ -371,27 +371,23 @@ func (s *Server) Start(ctx context.Context) error {
 		errCh <- nil
 	}()
 
-	// FINDING F-K4-5: binding successfully is NOT the same as owning the port.
+	// ENDPOINT OWNERSHIP SELF-CHECK.
 	//
-	// Measured on a Karpenter node: the agent bound `[::]:9100` while the
-	// prometheus-node-exporter addon held `[HOST_IP]:9100`. BOTH BINDS SUCCEEDED --
-	// Linux permits a wildcard bind alongside an existing specific-address bind --
-	// but the kernel routes inbound traffic to the MORE SPECIFIC socket. So pne
-	// answered every scrape and the agent's endpoint was unreachable, while the agent
-	// logged "serving node_exporter compatible metrics" and its DaemonSet reported
-	// Ready.
+	// HISTORY, because it matters for how much weight to give this: it was written for FINDING
+	// F-K4-5, which claimed a co-resident node_exporter could bind [HOST_IP]:9100 alongside our
+	// [::]:9100 and win the traffic. THAT FINDING WAS RETRACTED -- see JOURNAL-KARPENTER.md K4.8.
+	// Tested directly, no bind order permits coexistence without SO_REUSEPORT, the exporters set
+	// HOST_IP=0.0.0.0 (so they bind a wildcard anyway), and a live conflict produces a clean
+	// EADDRINUSE that the branch above already handles.
 	//
-	// That is worse than the crash F-K4-1 fixed, because nothing reports it: the
-	// scrape returns 200 with entirely plausible node metrics, just from the wrong
-	// process. A customer migrating off the pne addon -- the exact scenario this
-	// endpoint exists to enable -- would see success and be reading pne the whole
-	// time.
+	// The check is KEPT anyway, on narrower and honest grounds: binding a port successfully is
+	// genuinely not the same as owning it, and this cheaply verifies that WE are the process
+	// answering. It would catch SO_REUSEPORT coexistence, a proxy or NAT rule intercepting the
+	// port, or any future change that makes the endpoint serve someone else's data -- all cases
+	// where the scrape returns 200 with plausible metrics and nothing else reports a problem.
 	//
-	// It cannot be prevented from inside the process: the bind is legal and returns no
-	// error. So it is DETECTED instead, by scraping our own endpoint and looking for a
-	// metric family only this agent emits. Reported at ERROR rather than fatal --
-	// serving nothing is bad, but killing NodeCondition reporting over it would repeat
-	// F-K4-1's mistake.
+	// Costs one HTTP request per process lifetime, is silent when healthy, and reports
+	// INDETERMINATE rather than guessing when the probe cannot be performed.
 	go s.verifyOwnEndpoint(ctx, listener.Addr().String())
 
 	select {

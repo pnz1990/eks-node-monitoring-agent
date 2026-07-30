@@ -515,7 +515,7 @@ cannot distinguish "rare" from "unlucky sampling".**
 | **Duplicate `promhttp_metric_handler_errors_total` registration** | **every scrape partial** | live endpoint diff |
 | **`ErrorLog` unset** | 3,182 errors, zero log lines | the above |
 | **A metrics-port conflict panics the whole agent** | **BLOCKER — kills NodeCondition reporting** | Karpenter validation, §7.8 |
-| A `[::]` bind loses traffic to a `[HOST_IP]` bind | endpoint silently unreachable | Karpenter validation, §7.8 |
+| ~~A `[::]` bind loses traffic to a `[HOST_IP]` bind~~ | **RETRACTED — no defect (§7.8)** | Karpenter validation |
 
 ### 7.4 The Q9 defect, in detail — because of how it hid
 
@@ -633,7 +633,7 @@ end to end on all three variants.
 | | Finding | Severity |
 |---|---|---|
 | **F-K4-1** | A metrics-port bind conflict **panicked the entire agent** — `mgr.Add(metricsServer)` puts the listener under the controller-runtime manager, whose Runnable error becomes a panic via `utilruntime.Must(run())`. Measured: **5/5 CrashLoopBackOff**. It took down NodeCondition reporting, so Karpenter saw a node with no health signal. | **BLOCKER — fixed on both branches, verified live** |
-| **F-K4-5** | An agent on `:9100` beside a node_exporter does **not** collide: pne binds `[HOST_IP]:9100`, the agent binds `[::]:9100`, both succeed, and **pne receives the traffic**. The agent logs "serving metrics", the DaemonSet is Ready, the scrape returns 200 — from the wrong process. | **open — needs a decision** |
+| ~~**F-K4-5**~~ | ~~pne wins traffic on a shared port because it binds a more specific address~~ — **RETRACTED.** Tested directly: no bind order permits coexistence without `SO_REUSEPORT`, `HOST_IP` is `0.0.0.0` so pne binds a wildcard anyway, and live verification produced a clean `EADDRINUSE` handled by F-K4-1. My original probe used a metric absent from a *healthy agent* too, so a count of 0 proved nothing. `karpenter-integration.md` §3.2. | **no defect** |
 
 **F-K4-1 is the exact inverse of §3.2's resilience boundary.** That boundary was built so a
 *collector* defect could never kill condition reporting, and it works. A **startup** bind failure
@@ -739,12 +739,10 @@ every pod schedule" — and in the latter case owning the code is clearly correc
    already implemented and verified on **both** branches — but carrying F-K4-1 across is what
    revealed that a cherry-pick can silently miss `NewNativeServer`, so verify per implementation
    rather than assuming inheritance.
-3. **Decide F-K4-5** (§7.8) — the silently-unreachable endpoint. It is the worst-shaped failure in
-   this whole body of work, because *nothing reports it*: a migration that left the PNE addon
-   installed would look healthy and serve the wrong process's metrics. Recommend binding a specific
-   address, or detecting that the agent is not the process answering its own port. **This one is
-   directly on the critical path for "retire the PNE addon", since it only occurs when both are
-   installed — i.e. during exactly the migration this work exists to enable.**
+3. ~~**Decide F-K4-5**~~ — **RETRACTED, nothing to decide (§7.8).** A port conflict returns
+   `EADDRINUSE` and is handled by step 2's fix, verified live. The `verifyOwnEndpoint` self-check
+   built for it is retained as cheap insurance against a future interception (`SO_REUSEPORT`, a
+   proxy, a NAT rule), with an honest rationale rather than the disproven one.
 4. **Split the dependency branch into a clean PR.** Of 10,825 insertions only ~3,566 belong
    upstream; the rest are process artefacts. **`evidence/` contains an AWS account ID and Grafana
    credentials and must not be pushed to a public repository.**

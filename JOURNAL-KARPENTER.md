@@ -698,3 +698,89 @@ consequences are worth stating:
 **Not filed as a blocker for the forks**, because it is neither caused nor worsened by them. Raised
 as an NMA finding for the owners: *is a permanently sticky Fatal from a single log line the intended
 behaviour, given Karpenter will now forcefully replace the node 30 minutes later?*
+
+---
+
+## K4.8 — **F-K4-5 IS RETRACTED.** My mechanism was wrong, and the detector was built on the same error
+
+**Date:** 2026-07-30
+
+While implementing the F-K4-5 fix I tried to verify it live, and the verification disproved the
+finding it was meant to fix. Recording this fully, because the fix shipped to both branches on a
+false premise.
+
+### What I claimed
+
+> An agent on `:9100` beside a node_exporter does **not** collide: pne binds `[HOST_IP]:9100`, the
+> agent binds `[::]:9100`, both succeed, and pne receives the traffic because Linux routes to the
+> more specific socket. The agent's endpoint is silently unreachable.
+
+### Why it is wrong — three independent checks
+
+**1. The claimed bind coexistence does not happen.** Tested directly, both orders:
+
+```
+wildcard  then wildcard   -> EADDRINUSE
+wildcard  then specific   -> EADDRINUSE
+specific  then wildcard   -> EADDRINUSE      <- the order I specifically claimed
+SO_REUSEPORT on both      -> both bind       <- the ONLY way to coexist, and neither
+                                                process sets it
+```
+
+Linux does **not** permit a wildcard bind alongside a specific-address bind on the same port
+without `SO_REUSEPORT`. My premise was simply false.
+
+**2. `HOST_IP` is `0.0.0.0`, so pne is not binding a specific address anyway.** Read from the
+DaemonSet env on both exporter releases: `[{"name":"HOST_IP","value":"0.0.0.0"}]`. So
+`--web.listen-address=[$(HOST_IP)]:9100` expands to a **wildcard**, and the "more specific socket"
+in my explanation never existed.
+
+**3. Live verification produced the OPPOSITE result.** Deploying an agent on `:9100` onto a node
+where an exporter *was* running gave a clean `EADDRINUSE`, handled by F-K4-1's degradation path:
+
+```
+"failed to listen for node_exporter compatible metrics; the metrics endpoint is DISABLED ...
+ error: listen tcp :9100: bind: address already in use"
+```
+
+Node conditions kept reporting. **This is F-K4-1 working correctly, and there is no second failure
+mode to fix.**
+
+### What actually happened in the original observation
+
+Re-reading my own K4 evidence: when the agent bound `:9100` and stayed Running, I checked whether
+pne was on that node and my own output was **empty** — no exporter was running there. I noted that
+at the time and then reasoned past it. The exporters appeared on that node later, during
+rescheduling.
+
+And the probe I treated as decisive — *"`:9100` returned `node_collector_panics_total` count 0,
+an agent-only family, therefore pne is answering"* — was **invalid for the same reason the F-K4-5
+detector was initially broken**: `node_collector_panics_total` is a `CounterVec` with **no series
+until a panic occurs**, so it is absent from a **healthy agent's** endpoint too. A count of 0 was
+consistent with the agent answering, which is the opposite of what I concluded.
+
+**One broken marker produced both errors:** the false finding, and then the detector I built to
+catch it. The control test `TestOwnEndpointMarkerIsActuallyServedByThisAgent` caught the second and
+should have made me re-examine the first immediately — it took a live verification to force that.
+
+### What to do with the code
+
+The `verifyOwnEndpoint` self-check is **kept**, with its rationale corrected:
+
+- It does **not** guard the mechanism I described, because that mechanism does not exist.
+- It **does** cheaply verify a real property worth verifying — that the agent is the process
+  answering its own port — and would catch `SO_REUSEPORT` coexistence, a proxy or NAT rule
+  intercepting the port, or any future change that makes the endpoint serve someone else's data.
+- It is INDETERMINATE-safe and silent when healthy, so it costs one HTTP request per process
+  lifetime and cannot generate false alarms.
+
+Keeping a correct check with an honest rationale is better than reverting it and leaving no
+verification that the endpoint serves our own data. **But the finding is downgraded from "worst
+failure found" to "no defect; hypothesis disproven".**
+
+### Correction to the recommendation
+
+`docs/design/karpenter-integration.md` §3.2 and `node-metrics-experiment.md` §7.8 both state F-K4-5
+as an open defect and put it on the critical path for retiring the PNE addon. **Both are wrong and
+must be corrected.** The real behaviour on a port conflict is F-K4-1's degradation, which is already
+fixed and verified.

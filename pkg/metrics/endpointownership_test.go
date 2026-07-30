@@ -1,17 +1,19 @@
 package metrics
 
-// Tests for FINDING F-K4-5: binding a port successfully is not the same as owning it.
+// Tests for the endpoint-ownership self-check: binding a port successfully is not the same as
+// owning it.
 //
-// THE FAILURE BEING GUARDED. On a Karpenter node the agent bound `[::]:9100` while the
-// prometheus-node-exporter addon held `[HOST_IP]:9100`. Both binds SUCCEEDED -- Linux permits a
-// wildcard bind alongside an existing specific-address bind -- but the kernel routes inbound
-// traffic to the more specific socket. So pne answered every scrape, the agent's metrics were
-// unreachable, and the agent logged "serving node_exporter compatible metrics" with its DaemonSet
-// reporting Ready.
+// PROVENANCE, stated plainly because it changes how much weight to give these tests. They were
+// written for FINDING F-K4-5, which claimed a co-resident node_exporter on [HOST_IP]:9100 could
+// coexist with our [::]:9100 and win the traffic. THAT FINDING WAS RETRACTED
+// (JOURNAL-KARPENTER.md K4.8): no bind order permits coexistence without SO_REUSEPORT, the
+// exporters set HOST_IP=0.0.0.0 so they bind a wildcard anyway, and a live conflict produces a
+// clean EADDRINUSE that Start already degrades on.
 //
-// That is worse than the F-K4-1 crash, because nothing reports it: the scrape returns 200 with
-// plausible node metrics from the wrong process. A customer migrating off the pne addon -- the
-// exact scenario the endpoint exists to enable -- would see success while reading pne.
+// The check is kept on narrower grounds: it would catch SO_REUSEPORT coexistence, a proxy or NAT
+// rule intercepting the port, or any future change that makes the endpoint serve someone else's
+// data -- all cases where the scrape returns 200 with plausible metrics and nothing else reports a
+// problem.
 //
 // WHY THESE TESTS ARE STRUCTURED AS THEY ARE. The check cannot be tested by asserting "the log
 // contains a warning", because the interesting property is that it distinguishes THREE outcomes:
@@ -93,8 +95,10 @@ func TestVerifyOwnEndpointQuietWhenTheResponseIsOurs(t *testing.T) {
 }
 
 func TestVerifyOwnEndpointDetectsAShadowedPort(t *testing.T) {
-	// THE F-K4-5 CASE. The port answers 200 with a plausible node_exporter metric set that does
-	// NOT contain our marker -- exactly what a co-resident node_exporter serves.
+	// The port answers 200 with a plausible node_exporter metric set that does NOT contain our
+	// marker. Synthetic rather than reproduced from a real collision, since (per the header) the
+	// original collision mechanism was disproven -- but the DETECTION logic is what is under test,
+	// and it must work for whatever future cause puts another process on our port.
 	var buf bytes.Buffer
 	// A REAL pne response shape, including its build_info -- so this proves the check
 	// DISCRIMINATES between two similar payloads rather than merely detecting absence.

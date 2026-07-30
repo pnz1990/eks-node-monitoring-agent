@@ -1,8 +1,9 @@
 # Do the metrics forks compromise NMA's integration with Karpenter?
 
 **Verdict: No. Neither fork changes NMA's observable behaviour toward Karpenter.**
-**But testing against Karpenter found three defects that six nodes of managed-node-group testing
-never surfaced — one of them a blocker in shared code, now fixed.**
+**But testing against Karpenter found defects that six nodes of managed-node-group testing never
+surfaced — including a blocker in shared code, now fixed. One further finding (F-K4-5) was later
+RETRACTED when live verification disproved its mechanism; §3.2 records how.**
 
 | | |
 |---|---|
@@ -164,27 +165,45 @@ Verified live against the exact failing scenario: **5/5 CrashLoopBackOff → 5/5
 0 panics**, with `"reported node conditions"` present and `NetworkingReady=True`. Four tests, each
 with a negative control; full module 34/34 under `-race`.
 
-### 3.2 F-K4-5 — the `:9100`-vs-PNE case does *not* collide, and that is worse
+### 3.2 F-K4-5 — **RETRACTED.** My mechanism was wrong
 
-An agent configured on `:9100` alongside a running node-exporter: **5/5 Running, both bound
-successfully.**
+**This section previously reported a defect. It does not exist, and the retraction is more useful
+than the original claim.** Full working in `JOURNAL-KARPENTER.md` §K4.8.
 
-```
-pne   --web.listen-address=[$(HOST_IP)]:9100   <- specific address
-agent address="[::]:9100"                      <- all addresses
-```
+**What I claimed:** an agent on `:9100` beside a node_exporter does not collide — pne binds
+`[HOST_IP]:9100`, the agent binds `[::]:9100`, both succeed, and pne wins the traffic because Linux
+routes to the more specific socket, leaving the agent's endpoint silently unreachable.
 
-Linux permits both when the specific bind exists first — **but traffic goes to the specific one.**
-Probing `:9100` returned a metric set with `node_collector_panics_total` count **0**, an agent-only
-family, so **PNE is answering and the agent's endpoint is silently unreachable.**
+**Why it is wrong,** three independent checks:
 
-**Worse than a crash, because nothing reports it:** the agent logs "serving node_exporter compatible
-metrics", the DaemonSet is Ready, and the scrape returns 200 with plausible data — from the wrong
-process. A migration that left PNE installed would appear to work while never serving the agent's
-metrics.
+1. **The bind coexistence does not happen.** Tested directly: wildcard-then-specific,
+   specific-then-wildcard and wildcard-then-wildcard all return `EADDRINUSE`. Only `SO_REUSEPORT`
+   on **both** sockets permits coexistence, and neither process sets it.
+2. **`HOST_IP` is `0.0.0.0`** on both exporter releases, so `[$(HOST_IP)]:9100` expands to a
+   *wildcard*. The "more specific socket" in my explanation never existed.
+3. **Live verification gave the opposite result.** An agent configured on `:9100`, deployed onto a
+   node where an exporter *was* running, got a clean `EADDRINUSE` handled by F-K4-1's degradation
+   path — endpoint disabled, node conditions still reporting. **That is F-K4-1 working, not a second
+   defect.**
 
-**Unfixed and recommended for the owners:** the agent should either bind a specific address or
-detect that it is not the process answering its own port.
+**How I fooled myself.** In the original observation the agent bound `:9100` and stayed Running — but
+my own check for whether pne was on that node returned **empty**. No exporter was there; they
+appeared later during rescheduling. I noted the empty result and reasoned past it.
+
+The probe I treated as decisive — *`:9100` returned `node_collector_panics_total` count 0, an
+agent-only family, therefore pne is answering* — was invalid, because that metric is a `CounterVec`
+with **no series until a panic occurs** and is therefore absent from a **healthy agent's** endpoint
+too. A count of 0 was consistent with the agent answering.
+
+**The same broken marker produced both the false finding and the detector I built to catch it.** The
+control test `TestOwnEndpointMarkerIsActuallyServedByThisAgent` caught the second; it took a live
+verification to force a re-examination of the first.
+
+**What was kept:** the `verifyOwnEndpoint` self-check, with an honest rationale. It does not guard
+the mechanism above, because that mechanism does not exist — but it cheaply verifies a real property
+(that the agent is the process answering its own port) and would catch `SO_REUSEPORT` coexistence, a
+proxy or NAT rule intercepting the port, or any future change that makes the endpoint serve someone
+else's data. It is silent when healthy and INDETERMINATE-safe, so it cannot generate false alarms.
 
 ### 3.3 F-K3-1 — a latent probe misconfiguration, exposed by fresh nodes
 
@@ -289,9 +308,10 @@ Two items belong in whichever fork ships:
 1. **F-K4-1's fix is mandatory, not optional.** It is in shared code, it is a blocker, and it is
    already implemented and verified on the dependency branch. **It must be carried to the native
    branch** along with the Q9 handler fixes.
-2. **F-K4-5 needs a decision.** The silent-unreachable-endpoint case is the worst failure found here
-   precisely because nothing reports it. Recommend binding a specific address, or detecting that
-   another process owns the configured port.
+2. ~~**F-K4-5 needs a decision.**~~ **RETRACTED — no defect (§3.2).** The mechanism I described does
+   not exist: a real port conflict returns `EADDRINUSE` and is handled by F-K4-1's degradation path,
+   verified live. The `verifyOwnEndpoint` self-check built for it is kept as cheap insurance with a
+   corrected rationale, but **nothing here needs a decision.**
 
 And one for the NMA owners, independent of this choice: **F-K6-1**, the sticky log-triggered Fatal,
 now has a sharper consequence than it did before Karpenter was in the loop.
